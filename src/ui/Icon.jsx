@@ -598,7 +598,7 @@ const ICONS = {
       'M12 17 v.01',
     ],
   },
-  plus-circle: {
+  'plus-circle': {
     paths: [
       { d: 'M12 12 m-10 0 a10 10 0 1 0 20 0 a10 10 0 1 0 -20 0', filled: false },
       'M12 7 v10',
