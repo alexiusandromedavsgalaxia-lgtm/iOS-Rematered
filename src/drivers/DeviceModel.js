@@ -12,13 +12,9 @@ export const DEVICE_MODEL = Object.freeze({
   gpu: { cores: 6, family: 'Apple GPU Gen 6', name: 'Apple GPU Gen 6', tflops: 2.15 },
   ane: { cores: 16, tops: 35 },
   ram: { sizeGB: 8, type: 'LPDDR5X' },
-  storage: {
-    sizeGB: 256,
-    sizeBytes: 256 * 1024 * 1024 * 1024,
-    type: 'NVMe',
-    filesystem: 'APFS',
-  },
+  storage: { sizeGB: 256, sizeBytes: 256 * 1024 * 1024 * 1024, type: 'NVMe', filesystem: 'APFS' },
   display: {
+    name: 'Super Retina XDR OLED',
     sizeInches: 6.3,
     type: 'Super Retina XDR OLED',
     refreshHz: 120,
@@ -52,14 +48,7 @@ export const DEVICE_MODEL = Object.freeze({
     gps: { name: 'GNSS', systems: ['GPS', 'GLONASS', 'Galileo', 'BeiDou', 'QZSS'] },
   },
   security: ['Secure Enclave', 'Face ID', 'Touch ID (n/a)'],
-  battery: {
-    mAh: 3582,
-    capacityMah: 3582,
-    chemistry: 'Li-Ion',
-    voltage: 3.87,
-    wh: 13.86,
-    energyWh: 13.86,
-  },
+  battery: { mAh: 3582, capacityMah: 3582, chemistry: 'Li-Ion', voltage: 3.87, wh: 13.86, energyWh: 13.86 },
 });
 
 export default DEVICE_MODEL;
