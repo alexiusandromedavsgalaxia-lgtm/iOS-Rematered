@@ -24,7 +24,6 @@
  */
 
 import { logger, LogLevel } from '../system/Logger.js';
-import { MemoryManager } from './MemoryManager.js';
 import { Scheduler } from './Scheduler.js';
 import { ProcessManager } from './ProcessManager.js';
 import { Syscalls } from './Syscalls.js';
@@ -43,7 +42,6 @@ export const KernelState = {
 // la BootScreen muestre progreso visual. El orden importa.
 const BOOT_STEPS = [
   { id: 'logger',      label: 'Inicializando subsistema de logging' },
-  { id: 'memory',      label: 'Configurando MemoryManager' },
   { id: 'hardware',    label: 'Sondeando bus de hardware' },
   { id: 'drivers',     label: 'Cargando drivers de dispositivo' },
   { id: 'scheduler',   label: 'Arrancando scheduler' },
@@ -64,7 +62,6 @@ export class Kernel {
     this.arch       = options.arch    ?? 'arm64-sim';
 
     // Subsistemas — se instancian ya, pero algunos se "activan" en boot
-    this.memory     = new MemoryManager(options.memoryBytes);
     this.scheduler  = new Scheduler();
     this.syscalls   = new Syscalls(this);
     this.processes  = new ProcessManager(this);
