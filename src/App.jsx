@@ -16,7 +16,7 @@ import { GestureProvider } from './ui/GestureHandler.jsx';
 import { Device } from './ui/Device.jsx';
 import BootScreen from './ui/BootScreen.jsx';
 import LockScreen from './ui/LockScreen.jsx';
-import SpringBoard from './ui/SpringBoard.jsx';
+import SpringBoard from './ui/Springboard.jsx';
 import AppWindow from './ui/AppWindow.jsx';
 import ControlCenter from './ui/ControlCenter.jsx';
 import NotificationCenterUI from './ui/NotificationCenterUI.jsx';
