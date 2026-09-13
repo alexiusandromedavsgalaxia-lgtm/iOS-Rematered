@@ -1,0 +1,126 @@
+<!-- index.html -->
+<!-- iOS Remastered — HTML base -->
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#000000" />
+  <meta name="description" content="iOS Remastered — Un OS completo simulado en React. Kernel, drivers, loader Mach-O, apps nativas. Todo a mano, sin librerías externas." />
+
+  <!-- Apple mobile web app -->
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="iOS Remastered" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="format-detection" content="telephone=no" />
+
+  <!-- Favicon SVG con logo Apple -->
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%23000'/%3E%3Cpath fill='%23fff' d='M17.05 12.54c-.02-2.1 1.72-3.1 1.8-3.15-.98-1.44-2.5-1.63-3.04-1.65-1.3-.13-2.53.76-3.2.76-.66 0-1.67-.74-2.75-.72-1.42.02-2.73.82-3.46 2.09-1.48 2.56-.38 6.34 1.06 8.42.7 1.02 1.54 2.16 2.64 2.12 1.06-.04 1.46-.68 2.74-.68 1.28 0 1.64.68 2.76.66 1.14-.02 1.86-1.04 2.56-2.06.8-1.18 1.14-2.32 1.16-2.38-.03-.01-2.23-.86-2.25-3.4zM15.06 5.63c.58-.7.97-1.68.86-2.65-.83.03-1.84.55-2.44 1.25-.54.62-1 1.62-.88 2.57.93.07 1.88-.47 2.46-1.17z'/%3E%3C/svg%3E" />
+  <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'%3E%3Crect width='180' height='180' rx='38' fill='%23000'/%3E%3Cpath fill='%23fff' transform='translate(30 30) scale(5)' d='M17.05 12.54c-.02-2.1 1.72-3.1 1.8-3.15-.98-1.44-2.5-1.63-3.04-1.65-1.3-.13-2.53.76-3.2.76-.66 0-1.67-.74-2.75-.72-1.42.02-2.73.82-3.46 2.09-1.48 2.56-.38 6.34 1.06 8.42.7 1.02 1.54 2.16 2.64 2.12 1.06-.04 1.46-.68 2.74-.68 1.28 0 1.64.68 2.76.66 1.14-.02 1.86-1.04 2.56-2.06.8-1.18 1.14-2.32 1.16-2.38-.03-.01-2.23-.86-2.25-3.4zM15.06 5.63c.58-.7.97-1.68.86-2.65-.83.03-1.84.55-2.44 1.25-.54.62-1 1.62-.88 2.57.93.07 1.88-.47 2.46-1.17z'/%3E%3C/svg%3E" />
+
+  <!-- Splash screen mientras carga -->
+  <style>
+    #boot-splash {
+      position: fixed;
+      inset: 0;
+      background: #000;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 24px;
+      z-index: 99999;
+      font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+      transition: opacity .4s ease;
+    }
+    #boot-splash.is-hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+    #boot-splash svg {
+      width: 64px;
+      height: 64px;
+      fill: #fff;
+      animation: splash-pulse 1.6s ease-in-out infinite;
+    }
+    #boot-splash .splash-text {
+      color: #8e8e93;
+      font-size: 13px;
+      letter-spacing: .5px;
+      text-transform: uppercase;
+      font-weight: 500;
+    }
+    #boot-splash .splash-bar {
+      width: 120px;
+      height: 3px;
+      background: rgba(255,255,255,.1);
+      border-radius: 2px;
+      overflow: hidden;
+      position: relative;
+    }
+    #boot-splash .splash-bar::after {
+      content: '';
+      position: absolute;
+      left: 0; top: 0; bottom: 0;
+      width: 40%;
+      background: #fff;
+      border-radius: 2px;
+      animation: splash-bar 1.4s ease-in-out infinite;
+    }
+    @keyframes splash-pulse {
+      0%, 100% { opacity: .55; }
+      50%      { opacity: 1; }
+    }
+    @keyframes splash-bar {
+      0%   { transform: translateX(-100%); }
+      100% { transform: translateX(350%); }
+    }
+  </style>
+
+  <title>iOS Remastered</title>
+</head>
+<body>
+  <!-- Splash inicial, se oculta al montar React -->
+  <div id="boot-splash">
+    <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <path d="M17.05 12.54c-.02-2.1 1.72-3.1 1.8-3.15-.98-1.44-2.5-1.63-3.04-1.65-1.3-.13-2.53.76-3.2.76-.66 0-1.67-.74-2.75-.72-1.42.02-2.73.82-3.46 2.09-1.48 2.56-.38 6.34 1.06 8.42.7 1.02 1.54 2.16 2.64 2.12 1.06-.04 1.46-.68 2.74-.68 1.28 0 1.64.68 2.76.66 1.14-.02 1.86-1.04 2.56-2.06.8-1.18 1.14-2.32 1.16-2.38-.03-.01-2.23-.86-2.25-3.4zM15.06 5.63c.58-.7.97-1.68.86-2.65-.83.03-1.84.55-2.44 1.25-.54.62-1 1.62-.88 2.57.93.07 1.88-.47 2.46-1.17z"/>
+    </svg>
+    <div class="splash-bar"></div>
+    <div class="splash-text">iOS Remastered</div>
+  </div>
+
+  <noscript>
+    <div style="color:#fff;background:#000;padding:40px;font-family:system-ui;text-align:center">
+      <h1>JavaScript deshabilitado</h1>
+      <p style="color:#8e8e93">iOS Remastered necesita JavaScript para ejecutarse.</p>
+    </div>
+  </noscript>
+
+  <div id="root"></div>
+
+  <script type="module" src="/src/main.jsx"></script>
+
+  <!-- Ocultamos el splash cuando React monta -->
+  <script>
+    (function() {
+      const hide = () => {
+        const el = document.getElementById('boot-splash');
+        if (!el) return;
+        el.classList.add('is-hidden');
+        setTimeout(() => el.remove(), 500);
+      };
+      // Esperamos un tick y un rAF para asegurarnos de que React pintó
+      if (window.requestAnimationFrame) {
+        window.requestAnimationFrame(() => {
+          window.requestAnimationFrame(hide);
+        });
+      } else {
+        setTimeout(hide, 100);
+      }
+      // Safety net: ocultar tras 4s pase lo que pase
+      setTimeout(hide, 4000);
+    })();
+  </script>
+</body>
+</html>
