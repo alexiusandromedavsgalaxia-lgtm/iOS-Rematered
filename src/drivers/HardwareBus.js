@@ -17,7 +17,7 @@ import { VMagnetometer } from './VMagnetometer.js';
 import { VBarometer } from './VBarometer.js';
 import { VAmbientLight } from './VAmbientLight.js';
 import { VProximity } from './VProximity.js';
-import { VGPS } from './VGPS.js';
+import { VGPS } from './VGPS.jsx';
 
 // --- Audio ---
 import { VMicrophone } from './VMicrophone.js';
