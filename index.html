@@ -101,21 +101,4 @@
 
   <script type="module" src="/src/main.jsx"></script>
 
-  <!-- Ocultamos el splash cuando React monta -->
-  <script>
-    (function() {
-      const hide = () => {
-        const el = document.getElementById('boot-splash');
-        if (!el) return;
-        el.classList.add('is-hidden');
-        setTimeout(() => el.remove(), 500);
-      };
-      // Esperamos un tick y un rAF para asegurarnos de que React pintó
-      if (window.requestAnimationFrame) {
-        window.requestAnimationFrame(() => {
-          window.requestAnimationFrame(hide);
-        });
-      } else {
-        setTimeout(hide, 100);
-      }
- 
+  
