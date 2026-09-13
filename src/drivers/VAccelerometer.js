@@ -844,4 +844,285 @@ export class VAccelerometer {
     this.detection.impact = true;
     this.detection.lastImpactTs = Date.now();
     this.metrics.impactEvents++;
-   
+       const now = Date.now();
+
+    logger.warn(
+      'VAccelerometer',
+      `💥 impacto simulado (mag=${magnitude.toFixed(2)}g)`
+    );
+
+    for (const fn of this.motionSubscribers) {
+      try {
+        fn({
+          type: 'impact',
+          magnitude,
+          simulated: true,
+          timestamp: now,
+        });
+      } catch (_) {}
+    }
+
+    this.bus?.raiseInterrupt?.(
+      'IRQ_MOTION',
+      {
+        source: 'vaccel',
+        event: 'impact',
+        magnitude: parseFloat(magnitude.toFixed(2)),
+        simulated: true,
+      },
+      'vaccel'
+    );
+
+    this._emit();
+    return true;
+  }
+
+  /**
+   * Reinicia todos los estados temporales de detección.
+   */
+  resetDetection() {
+    this.detection.shake = false;
+    this.detection.shakeIntensity = 0;
+    this.detection.lastShakeTs = null;
+
+    this.detection.freeFall = false;
+    this.detection.freeFallStart = null;
+
+    this.detection.impact = false;
+    this.detection.lastImpactTs = null;
+    this.detection.peakG = 0;
+
+    this._freeFallStart = null;
+    this._shakeStart = null;
+    this._peakWindow = [];
+
+    this._emit();
+    return true;
+  }
+
+  /**
+   * Cambia la constante del filtro EMA.
+   */
+  setFilterAlpha(alpha) {
+    const value = Number(alpha);
+
+    if (!Number.isFinite(value)) {
+      logger.warn('VAccelerometer', `alpha inválido: ${alpha}`);
+      return false;
+    }
+
+    this.filter.setAlpha(value);
+    logger.info(
+      'VAccelerometer',
+      `filtro EMA: alpha=${this.filter.alpha.toFixed(3)}`
+    );
+
+    this._emit();
+    return true;
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // SUSCRIPCIONES
+  // ═══════════════════════════════════════════════════════════
+
+  subscribe(fn) {
+    if (typeof fn !== 'function') return () => {};
+
+    this.subscribers.add(fn);
+
+    return () => {
+      this.unsubscribe(fn);
+    };
+  }
+
+  unsubscribe(fn) {
+    return this.subscribers.delete(fn);
+  }
+
+  onOrientation(fn) {
+    if (typeof fn !== 'function') return () => {};
+
+    this.orientationSubscribers.add(fn);
+
+    return () => {
+      this.orientationSubscribers.delete(fn);
+    };
+  }
+
+  onActivity(fn) {
+    if (typeof fn !== 'function') return () => {};
+
+    this.activitySubscribers.add(fn);
+
+    return () => {
+      this.activitySubscribers.delete(fn);
+    };
+  }
+
+  onStep(fn) {
+    if (typeof fn !== 'function') return () => {};
+
+    this.stepSubscribers.add(fn);
+
+    return () => {
+      this.stepSubscribers.delete(fn);
+    };
+  }
+
+  onMotion(fn) {
+    if (typeof fn !== 'function') return () => {};
+
+    this.motionSubscribers.add(fn);
+
+    return () => {
+      this.motionSubscribers.delete(fn);
+    };
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // LECTURAS
+  // ═══════════════════════════════════════════════════════════
+
+  getCurrent() {
+    return { ...this.current };
+  }
+
+  getGravity() {
+    return { ...this.gravity };
+  }
+
+  getLinearAcceleration() {
+    return { ...this.linear };
+  }
+
+  getOrientation() {
+    return this.orientation;
+  }
+
+  getActivity() {
+    return this.activity;
+  }
+
+  getHistory(limit = this.history.length) {
+    limit = Math.max(0, Math.floor(Number(limit) || 0));
+    return this.history.last(limit);
+  }
+
+  getMetrics() {
+    return {
+      ...this.metrics,
+      throughput: { ...this.throughput },
+      currentPowerMw: this.currentPowerMw,
+      sampleRateHz: this.sampleRateHz,
+      rangeG: this.rangeG,
+      state: this.state,
+      running: this.running,
+      enabled: this.enabled,
+    };
+  }
+
+  getStatus() {
+    return {
+      name: this.name,
+      model: this.model,
+      state: this.state,
+      initialized: this.initialized,
+      running: this.running,
+      enabled: this.enabled,
+      lowPowerMode: this.lowPowerMode,
+
+      rangeG: this.rangeG,
+      sampleRateHz: this.sampleRateHz,
+
+      current: { ...this.current },
+      gravity: { ...this.gravity },
+      linear: { ...this.linear },
+
+      orientation: this.orientation,
+      activity: this.activity,
+
+      steps: this.getStepCount(),
+      detection: { ...this.detection },
+
+      calibration: {
+        calibrated: this.calibration.calibrated,
+        calibratedAt: this.calibration.calibratedAt,
+        noiseG: this.calibration.noiseG,
+        biasG: { ...this.calibration.biasG },
+      },
+
+      powerMw: this.currentPowerMw,
+      throughput: { ...this.throughput },
+      metrics: { ...this.metrics },
+    };
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // NOTIFICACIÓN INTERNA
+  // ═══════════════════════════════════════════════════════════
+
+  _emit() {
+    const payload = {
+      current: { ...this.current },
+      gravity: { ...this.gravity },
+      linear: { ...this.linear },
+
+      orientation: this.orientation,
+      activity: this.activity,
+
+      steps: this.getStepCount(),
+      detection: { ...this.detection },
+
+      state: this.state,
+      running: this.running,
+      enabled: this.enabled,
+
+      sampleRateHz: this.sampleRateHz,
+      rangeG: this.rangeG,
+      powerMw: this.currentPowerMw,
+
+      timestamp: Date.now(),
+    };
+
+    for (const fn of this.subscribers) {
+      try {
+        fn(payload);
+      } catch (_) {}
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // DESTRUCCIÓN
+  // ═══════════════════════════════════════════════════════════
+
+  destroy() {
+    if (this.tickId !== null) {
+      clearInterval(this.tickId);
+      this.tickId = null;
+    }
+
+    this.running = false;
+    this.initialized = false;
+    this.state = AccelState.OFF;
+    this.currentPowerMw = 0;
+
+    this.subscribers.clear();
+    this.orientationSubscribers.clear();
+    this.activitySubscribers.clear();
+    this.stepSubscribers.clear();
+    this.motionSubscribers.clear();
+
+    this.history.clear();
+    this.filter.reset();
+
+    this._peakWindow = [];
+    this._freeFallStart = null;
+    this._shakeStart = null;
+
+    this.resetDetection();
+
+    logger.info('VAccelerometer', 'destruido');
+  }
+}
+
+export default VAccelerometer;
