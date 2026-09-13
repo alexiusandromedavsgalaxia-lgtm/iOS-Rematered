@@ -136,7 +136,7 @@ class TagRateLimiter {
 // ───────────────────────────────────────────────────────────────
 // Logger
 // ───────────────────────────────────────────────────────────────
-class Logger {
+export class Logger {
   constructor(options = {}) {
     this.capacity      = options.capacity      ?? 5000;
     this.minLevel      = options.minLevel      ?? LogLevel.DEBUG;
