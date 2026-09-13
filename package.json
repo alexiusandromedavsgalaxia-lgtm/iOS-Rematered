@@ -1,0 +1,38 @@
+{
+  "name": "ios-remastered",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "iOS Remastered — Un OS completo simulado en React. Kernel, drivers, loader Mach-O, apps nativas. Sin librerías externas.",
+  "author": "iOS Remastered",
+  "license": "MIT",
+
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "start": "vite --host",
+    "clean": "rm -rf dist node_modules/.vite"
+  },
+
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
+    "vite": "^5.4.0"
+  },
+
+  "engines": {
+    "node": ">=18.0.0"
+  },
+
+  "browserslist": [
+    "last 2 Chrome versions",
+    "last 2 Safari versions",
+    "last 2 Firefox versions",
+    "last 2 Edge versions"
+  ]
+}
