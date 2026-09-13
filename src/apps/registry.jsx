@@ -1,26 +1,18 @@
 // src/apps/registry.jsx
 // iOS Remastered — Registro central de aplicaciones
-// Catálogo completo de apps del sistema, páginas del Springboard, Dock,
-// entitlements, lazy loading, store reactivo con subscribe, hooks y API.
-// Sin dependencias externas.
+// Solo apps que existen realmente en src/apps/. Store reactivo, hooks, API completa.
 
 import React, {
-  useState, useEffect, useMemo, useCallback,
+  useState, useEffect, useMemo,
 } from 'react';
 
 /* ============================================================================
- * LAZY LOADING DE APPS
- * Cada app se carga bajo demanda vía React.lazy cuando el usuario la abre.
- * ========================================================================== */
-
-const lazy = (loader) => React.lazy(loader);
-
-/* ============================================================================
  * DEFINICIÓN DE APPS DEL SISTEMA
+ * Cada loader apunta a un archivo REAL en src/apps/.
  * ========================================================================== */
 
 export const SYSTEM_APPS = [
-  /* ============================ PRIMERA PANTALLA ============================ */
+  /* ============================ SISTEMA ============================ */
   {
     bundleId: 'com.apple.springboard',
     name: 'SpringBoard',
@@ -35,8 +27,33 @@ export const SYSTEM_APPS = [
     noUninstall: true,
     loader: null,
   },
-
-,
+  {
+    bundleId: 'com.apple.Preferences',
+    name: 'Settings',
+    displayName: 'Ajustes',
+    version: '1.0.0',
+    icon: 'gearshape.fill',
+    color: '#8e8e93',
+    gradient: ['#8e8e93', '#636366'],
+    category: 'system',
+    defaultPage: 0,
+    defaultSlot: 4,
+    dock: true,
+    entitlements: ['system.settings', 'keychain.read'],
+    loader: () => import('./Setting.jsx'),
+  },
+  {
+    bundleId: 'com.apple.AppStore',
+    name: 'AppStore',
+    displayName: 'App Store',
+    version: '1.0.0',
+    icon: 'app.badge.fill',
+    color: '#0a84ff',
+    gradient: ['#0a84ff', '#5e5ce6'],
+    category: 'system',
+    defaultPage: 1,
+    entitlements: ['network', 'install'],
+    loader: () => import('./AppStore.jsx'),
   },
 
   /* ============================ MEDIA ============================ */
@@ -50,7 +67,7 @@ export const SYSTEM_APPS = [
     gradient: ['#0a84ff', '#64d2ff'],
     category: 'productivity',
     defaultPage: 0,
-    defaultSlot: 2,
+    defaultSlot: 0,
     dock: true,
     entitlements: ['network', 'downloads', 'history'],
     loader: () => import('./Safari.jsx'),
@@ -65,32 +82,10 @@ export const SYSTEM_APPS = [
     gradient: ['#ff9f0a', '#ff375f', '#bf5af2'],
     category: 'media',
     defaultPage: 0,
-    defaultSlot: 3,
+    defaultSlot: 1,
     dock: true,
     entitlements: ['photos.read', 'photos.write', 'camera'],
     loader: () => import('./Photos.jsx'),
-  },
-  {
-
-  },
-  {
-    
-  },
-
-  },
-  {
-
-  },
-  {
-    bundleId: 'com.apple.Photos',
-    name: 'Videos',
-    displayName: 'Vídeos',
-    version: '1.0.0',
-    icon: 'video.rectangle.fill',
-    color: '#8e8e93',
-    category: 'media',
-    hidden: true,
-    loader: null,
   },
 
   /* ============================ PRODUCTIVIDAD ============================ */
@@ -103,12 +98,10 @@ export const SYSTEM_APPS = [
     color: '#ffd60a',
     gradient: ['#ffd60a', '#ff9f0a'],
     category: 'productivity',
-    defaultPage: 1,
+    defaultPage: 0,
+    defaultSlot: 2,
     entitlements: ['documents', 'icloud'],
     loader: () => import('./Notes.jsx'),
-  },
-  {
- 
   },
 
   /* ============================ UTILIDADES ============================ */
@@ -121,7 +114,8 @@ export const SYSTEM_APPS = [
     color: '#8e8e93',
     gradient: ['#1c1c1e', '#3a3a3c'],
     category: 'utilities',
-    defaultPage: 2,
+    defaultPage: 0,
+    defaultSlot: 5,
     entitlements: [],
     loader: () => import('./Calculator.jsx'),
   },
@@ -132,8 +126,10 @@ export const SYSTEM_APPS = [
     version: '1.0.0',
     icon: 'clock.fill',
     color: '#000000',
+    gradient: ['#1c1c1e', '#000000'],
     category: 'utilities',
     defaultPage: 0,
+    defaultSlot: 6,
     entitlements: ['alarms', 'notifications'],
     loader: () => import('./Clock.jsx'),
   },
@@ -147,11 +143,9 @@ export const SYSTEM_APPS = [
     gradient: ['#4A90E2', '#87CEEB'],
     category: 'utilities',
     defaultPage: 0,
+    defaultSlot: 7,
     entitlements: ['location', 'network'],
     loader: () => import('./Weather.jsx'),
-  },
-  {
-  
   },
   {
     bundleId: 'com.apple.files',
@@ -162,125 +156,60 @@ export const SYSTEM_APPS = [
     color: '#0a84ff',
     gradient: ['#0a84ff', '#64d2ff'],
     category: 'utilities',
-    defaultPage: 3,
+    defaultPage: 0,
+    defaultSlot: 3,
     entitlements: ['documents', 'icloud', 'downloads'],
     loader: () => import('./Files.jsx'),
   },
-  {
- 
-  },
-
-  /* ============================ AJUSTES Y TIENDA ============================ */
-  {
-    bundleId: 'com.apple.Preferences',
-    name: 'Settings',
-    displayName: 'Ajustes',
-    version: '1.0.0',
-    icon: 'gearshape.fill',
-    color: '#8e8e93',
-    gradient: ['#8e8e93', '#636366'],
-    category: 'system',
-    defaultPage: 0,
-    defaultSlot: 4,
-    dock: true,
-    entitlements: ['system.settings', 'keychain.read'],
-    loader: () => import('./Settings.jsx'),
-  },
-  {
-    bundleId: 'com.apple.AppStore',
-    name: 'AppStore',
-    displayName: 'App Store',
-    version: '1.0.0',
-    icon: 'app.badge.fill',
-    color: '#0a84ff',
-    gradient: ['#0a84ff', '#5e5ce6'],
-    category: 'system',
-    defaultPage: 2,
-    entitlements: ['network', 'install'],
-    loader: () => import('./AppStore.jsx'),
-  } }, },];
+];
 
 /* ============================================================================
- * ENTITLEMENTS — definición legible
+ * ENTITLEMENTS
  * ========================================================================== */
 
 export const ENTITLEMENTS = {
-  network:           { label: 'Acceso a red',              icon: 'wifi',                 color: '#0a84ff' },
-  camera:            { label: 'Cámara',                    icon: 'camera.fill',          color: '#8e8e93' },
-  microphone:        { label: 'Micrófono',                 icon: 'mic.fill',             color: '#ff453a' },
-  location:          { label: 'Ubicación',                 icon: 'location.fill',        color: '#0a84ff' },
-  photos_read:       { label: 'Leer fotos',                icon: 'photo',                color: '#30d158' },
-  photos_write:      { label: 'Escribir fotos',            icon: 'photo.badge.plus',     color: '#30d158' },
-  contacts_read:     { label: 'Leer contactos',            icon: 'person.crop.circle',   color: '#8e8e93' },
-  contacts_write:    { label: 'Escribir contactos',        icon: 'person.crop.circle.badge.plus', color: '#8e8e93' },
-  calendar_read:     { label: 'Leer calendario',           icon: 'calendar',             color: '#ff453a' },
-  calendar_write:    { label: 'Escribir calendario',       icon: 'calendar.badge.plus',  color: '#ff453a' },
-  reminders_read:    { label: 'Leer recordatorios',        icon: 'checklist',            color: '#0a84ff' },
-  reminders_write:   { label: 'Escribir recordatorios',    icon: 'checklist.checked',    color: '#0a84ff' },
-  health_read:       { label: 'Leer datos de salud',       icon: 'heart',                color: '#ff375f' },
-  health_write:      { label: 'Escribir datos de salud',   icon: 'heart.text.square',    color: '#ff375f' },
-  mail_read:         { label: 'Leer correo',               icon: 'envelope.open',        color: '#0a84ff' },
-  mail_send:         { label: 'Enviar correo',             icon: 'paperplane.fill',      color: '#0a84ff' },
-  messages_read:     { label: 'Leer mensajes',             icon: 'message',              color: '#30d158' },
-  messages_send:     { label: 'Enviar mensajes',           icon: 'message.fill',         color: '#30d158' },
-  telephony:         { label: 'Telefonía',                 icon: 'phone.fill',           color: '#30d158' },
-  audio:             { label: 'Audio',                     icon: 'speaker.wave.2.fill',  color: '#ff375f' },
-  video:             { label: 'Vídeo',                     icon: 'video.fill',           color: '#bf5af2' },
-  documents:         { label: 'Documentos',                icon: 'doc.fill',             color: '#8e8e93' },
-  downloads:         { label: 'Descargas',                 icon: 'arrow.down.circle',    color: '#0a84ff' },
-  icloud:            { label: 'iCloud',                    icon: 'cloud.fill',           color: '#0a84ff' },
-  install:           { label: 'Instalar apps',             icon: 'square.and.arrow.down', color: '#0a84ff' },
-  system_settings:   { label: 'Ajustes del sistema',       icon: 'gearshape.fill',       color: '#8e8e93' },
-  keychain_read:     { label: 'Llavero',                   icon: 'key.fill',             color: '#ffd60a' },
-  notifications:     { label: 'Notificaciones',            icon: 'bell.fill',            color: '#ff453a' },
-  motion:            { label: 'Movimiento',                icon: 'figure.walk',          color: '#30d158' },
-  magnetometer:      { label: 'Magnetómetro',              icon: 'location.north',       color: '#ff453a' },
-  arkit:             { label: 'AR',                        icon: 'arkit',                color: '#bf5af2' },
-  nfc:               { label: 'NFC',                       icon: 'wave.3.right',         color: '#0a84ff' },
-  secure_enclave:    { label: 'Secure Enclave',            icon: 'lock.shield.fill',     color: '#30d158' },
-  homekit:           { label: 'Casa',                      icon: 'house.fill',           color: '#ff9f0a' },
-  automation:        { label: 'Automatización',            icon: 'wand.and.stars',       color: '#bf5af2' },
-  library:           { label: 'Biblioteca',                icon: 'books.vertical.fill',  color: '#ff9f0a' },
-  library_read:      { label: 'Leer biblioteca',           icon: 'books.vertical',       color: '#ff9f0a' },
-  history:           { label: 'Historial',                 icon: 'clock.arrow.circlepath', color: '#8e8e93' },
+  network:         { label: 'Acceso a red',          icon: 'wifi',                 color: '#0a84ff' },
+  camera:          { label: 'Cámara',                icon: 'camera.fill',          color: '#8e8e93' },
+  microphone:      { label: 'Micrófono',             icon: 'mic.fill',             color: '#ff453a' },
+  location:        { label: 'Ubicación',             icon: 'location.fill',        color: '#0a84ff' },
+  photos_read:     { label: 'Leer fotos',            icon: 'photo',                color: '#30d158' },
+  photos_write:    { label: 'Escribir fotos',        icon: 'photo.badge.plus',     color: '#30d158' },
+  documents:       { label: 'Documentos',            icon: 'doc.fill',             color: '#8e8e93' },
+  downloads:       { label: 'Descargas',             icon: 'arrow.down.circle',    color: '#0a84ff' },
+  icloud:          { label: 'iCloud',                icon: 'cloud.fill',           color: '#0a84ff' },
+  install:         { label: 'Instalar apps',         icon: 'square.and.arrow.down', color: '#0a84ff' },
+  system_settings: { label: 'Ajustes del sistema',   icon: 'gearshape.fill',       color: '#8e8e93' },
+  keychain_read:   { label: 'Llavero',               icon: 'key.fill',             color: '#ffd60a' },
+  notifications:   { label: 'Notificaciones',        icon: 'bell.fill',            color: '#ff453a' },
+  alarms:          { label: 'Alarmas',               icon: 'alarm.fill',           color: '#ff9f0a' },
+  history:         { label: 'Historial',             icon: 'clock.arrow.circlepath', color: '#8e8e93' },
 };
 
 /* ============================================================================
- * DISTRIBUCIÓN POR DEFECTO EN EL SPRINGBOARD
+ * LAYOUT POR DEFECTO
  * ========================================================================== */
 
 export const DEFAULT_PAGES = [
-  // Página 0
   [
-    
     'com.apple.mobilesafari',
     'com.apple.mobileslideshow',
-    
+    'com.apple.mobilenotes',
+    'com.apple.files',
+    'com.apple.calculator',
     'com.apple.clock',
     'com.apple.weather',
-    'com.apple.calculator',
- 
-    'com.apple.mobilenotes',
-  
     'com.apple.Preferences',
   ],
-  // Página 1
   [
-    
     'com.apple.AppStore',
-    'com.apple.files',
-    
-  ],
-  // Página 2
-  [
-
   ],
 ];
 
 export const DEFAULT_DOCK = [
-  'com.apple.AppStore',
   'com.apple.mobilesafari',
   'com.apple.mobileslideshow',
+  'com.apple.mobilenotes',
+  'com.apple.files',
   'com.apple.Preferences',
 ];
 
@@ -292,9 +221,9 @@ const listeners = new Set();
 
 const state = {
   apps: new Map(),
-  pages: [...DEFAULT_PAGES.map((p) => [...p])],
+  pages: DEFAULT_PAGES.map((p) => [...p]),
   dock: [...DEFAULT_DOCK],
-  favorites: ['com.apple.mobilesafari', 'com.apple.mobileslideshow', ]
+  favorites: ['com.apple.mobilesafari', 'com.apple.mobileslideshow'],
   folders: [],
   badges: new Map(),
   installedAt: new Map(),
@@ -312,6 +241,10 @@ for (const app of SYSTEM_APPS) {
   });
   state.installedAt.set(app.bundleId, Date.now());
 }
+
+// Badges iniciales
+state.badges.set('com.apple.AppStore', 3);
+state.badges.set('com.apple.mobilenotes', 2);
 
 function emit() {
   state.version++;
@@ -345,8 +278,6 @@ function snapshot() {
 export const registry = {
   subscribe,
   snapshot,
-
-  /* --------------------------- Consultas -------------------------- */
 
   all() {
     return [...state.apps.values()].filter((a) => !a.hidden);
@@ -425,15 +356,12 @@ export const registry = {
     return state.folders.map((f) => ({ ...f, apps: [...f.apps] }));
   },
 
-  /* --------------------------- Registro -------------------------- */
-
   register(app) {
     if (!app || !app.bundleId) {
       console.warn('[registry] app sin bundleId');
       return false;
     }
     if (state.apps.has(app.bundleId)) {
-      // Si ya existe pero no está instalada, la instalamos
       const existing = state.apps.get(app.bundleId);
       if (!existing.installed) {
         state.apps.set(app.bundleId, { ...existing, ...app, installed: true, installedAt: Date.now() });
@@ -459,15 +387,14 @@ export const registry = {
   unregister(bundleId) {
     const app = state.apps.get(bundleId);
     if (!app) return false;
-    if (app.system && !app.noUninstall) {
-      // Apps de sistema: no se pueden desinstalar realmente, solo ocultar
-      state.hidden.add(bundleId);
-      emit();
-      return true;
-    }
     if (app.noUninstall) {
       console.warn(`[registry] ${bundleId} no se puede desinstalar`);
       return false;
+    }
+    if (app.system) {
+      state.hidden.add(bundleId);
+      emit();
+      return true;
     }
     state.apps.delete(bundleId);
     state.installedAt.delete(bundleId);
@@ -482,8 +409,6 @@ export const registry = {
     return true;
   },
 
-  /* --------------------------- Layout -------------------------- */
-
   setPages(pages) {
     if (!Array.isArray(pages)) return;
     state.pages = pages.map((p) => p.filter((id) => state.apps.has(id)));
@@ -497,7 +422,6 @@ export const registry = {
   },
 
   moveApp(bundleId, toPage, toSlot) {
-    // Quitar de todas las páginas
     for (const page of state.pages) {
       const idx = page.indexOf(bundleId);
       if (idx !== -1) page.splice(idx, 1);
@@ -505,7 +429,6 @@ export const registry = {
     const dockIdx = state.dock.indexOf(bundleId);
     if (dockIdx !== -1) state.dock.splice(dockIdx, 1);
 
-    // Insertar en destino
     if (toPage === 'dock') {
       if (state.dock.length >= 5) return;
       state.dock.push(bundleId);
@@ -519,7 +442,6 @@ export const registry = {
   addToDock(bundleId) {
     if (state.dock.includes(bundleId)) return false;
     if (state.dock.length >= 5) return false;
-    // Quitar de páginas
     for (const page of state.pages) {
       const idx = page.indexOf(bundleId);
       if (idx !== -1) page.splice(idx, 1);
@@ -533,7 +455,6 @@ export const registry = {
     const idx = state.dock.indexOf(bundleId);
     if (idx === -1) return false;
     state.dock.splice(idx, 1);
-    // Devolver a la primera página
     if (state.pages[0]) state.pages[0].push(bundleId);
     emit();
     return true;
@@ -551,8 +472,6 @@ export const registry = {
     if (!fav && idx !== -1) state.favorites.splice(idx, 1);
     emit();
   },
-
-  /* --------------------------- Badges -------------------------- */
 
   setBadge(bundleId, count) {
     if (count > 0) state.badges.set(bundleId, count);
@@ -576,13 +495,10 @@ export const registry = {
     emit();
   },
 
-  /* --------------------------- Carpetas -------------------------- */
-
   createFolder(name, bundleIds = []) {
     const id = `folder_${Date.now().toString(36)}`;
     const folder = { id, name, apps: bundleIds.slice(0, 9) };
     state.folders.push(folder);
-    // Quitar apps de páginas
     for (const bid of folder.apps) {
       for (const page of state.pages) {
         const idx = page.indexOf(bid);
@@ -625,7 +541,6 @@ export const registry = {
     const idx = state.folders.findIndex((f) => f.id === folderId);
     if (idx === -1) return false;
     const folder = state.folders[idx];
-    // Devolver apps a la primera página
     for (const bid of folder.apps) {
       if (state.pages[0]) state.pages[0].push(bid);
     }
@@ -634,12 +549,10 @@ export const registry = {
     return true;
   },
 
-  /* --------------------------- Reset -------------------------- */
-
   resetLayout() {
     state.pages = DEFAULT_PAGES.map((p) => [...p]);
     state.dock = [...DEFAULT_DOCK];
-    state.favorites = ['com.apple.mobilesafari', 'com.apple.mobileslideshow', 'com.apple.music'];
+    state.favorites = ['com.apple.mobilesafari', 'com.apple.mobileslideshow'];
     state.folders = [];
     emit();
   },
@@ -656,6 +569,8 @@ export const registry = {
         ...app, system: true, installed: true, installedAt: Date.now(),
       });
     }
+    state.badges.set('com.apple.AppStore', 3);
+    state.badges.set('com.apple.mobilenotes', 2);
     emit();
   },
 };
@@ -765,79 +680,23 @@ export function formatEntitlements(list) {
 }
 
 /* ============================================================================
- * VALIDACIÓN DE BADGES EN APPS DE SISTEMA
- * Algunas apps nacen con badges por defecto
- * ========================================================================== */
-
-// Mail: 3 no leídos
-registry.setBadge('com.apple.mobilemail', 3);
-// Mensajes: 2 no leídos
-registry.setBadge('com.apple.MobileSMS', 2);
-// App Store: 5 actualizaciones disponibles
-registry.setBadge('com.apple.AppStore', 5);
-// Recordatorios: 4 pendientes
-registry.setBadge('com.apple.reminders', 4);
-
-/* ============================================================================
- * EXPORTS ADICIONALES
+ * EXPORTS
  * ========================================================================== */
 
 export default registry;
 
 export const categoryLabels = {
   system:         'Sistema',
-  social:         'Social',
   productivity:   'Productividad',
   media:          'Multimedia',
   utilities:      'Utilidades',
-  health:         'Salud',
-  finance:        'Finanzas',
-  entertainment: 'Entretenimiento',
-  home:           'Casa',
   other:          'Otras',
 };
 
 export const categoryIcons = {
   system:         'gearshape.fill',
-  social:         'person.2.fill',
   productivity:   'doc.text.fill',
   media:          'play.rectangle.fill',
   utilities:      'wrench.and.screwdriver.fill',
-  health:         'heart.fill',
-  finance:        'creditcard.fill',
-  entertainment:  'sparkles',
-  home:           'house.fill',
   other:          'square.grid.2x2.fill',
 };
-
-/* ============================================================================
- * TOTAL: ~900 líneas
- *
- * Catálogo completo:
- * - 44 apps del sistema registradas
- * - Categorías con labels e iconos
- * - Entitlements definidos con nombre + icono + color
- * - Layout por defecto: 3 páginas + Dock de 5
- * - Store reactivo con subscribe/snapshot
- *
- * API pública:
- * - Consultas: all, get, exists, getPages, getDock, getCategories,
- *   getInstalled, getUserInstalled, getBadgeCount, isHidden, isFavorite,
- *   getFolders
- * - Registro: register, unregister
- * - Layout: setPages, setDock, moveApp, addToDock, removeFromDock,
- *   setHidden, setFavorite
- * - Badges: setBadge, incrementBadge, clearBadge, clearAllBadges
- * - Carpetas: createFolder, addToFolder, removeFromFolder, renameFolder,
- *   deleteFolder
- * - Reset: resetLayout, reset
- *
- * Hooks:
- * - useRegistry, useRegistrySync, useApp, usePages, usePagesRaw,
- *   useDock, useDockRaw, useCategories, useBadge, useInstalled,
- *   useUserInstalled
- *
- * Helpers:
- * - withBadges, resolveApps, getBadgeCount, resolveEntitlement,
- *   formatEntitlements
- * ========================================================================== */
