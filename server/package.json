@@ -1,0 +1,19 @@
+// package.json del backend (server/package.json) — si quieres tenerlo aparte
+{
+  "name": "ios-remastered-proxy",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Proxy Browserless → Chromium real para Safari.jsx de iOS Remastered",
+  "scripts": {
+    "start": "node proxy.js",
+    "dev": "node --watch proxy.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "puppeteer-core": "^23.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
