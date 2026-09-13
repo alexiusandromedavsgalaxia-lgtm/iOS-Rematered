@@ -1,89 +1,76 @@
 // src/drivers/VThermal.jsx
-// iOS Remastered — Driver VThermal
-// Sensor térmico virtual con múltiples zonas, mitigación dinámica,
-// política de throttling, histórico y eventos al HardwareBus.
-// Sin dependencias externas.
+// iOS Remastered — Virtual thermal driver
+// Sensor térmico virtual, simulación, throttling y API para HardwareBus.
 
-import React, {
-  useState, useEffect, useRef, useMemo, useCallback, useReducer,
-} from 'react';
-
-/* ============================================================================
- * CONSTANTES
- * ========================================================================== */
+import { useEffect, useMemo, useReducer, useRef } from 'react';
 
 export const THERMAL_STATE = {
-  NOMINAL:  'nominal',
-  FAIR:     'fair',
-  SERIOUS:  'serious',
+  NOMINAL: 'nominal',
+  FAIR: 'fair',
+  SERIOUS: 'serious',
   CRITICAL: 'critical',
   SHUTDOWN: 'shutdown',
 };
 
 export const THERMAL_LEVELS = {
-  nominal:  { level: 0, color: '#30d158', label: 'Nominal',   maxTemp: 35, throttle: 1.00 },
-  fair:     { level: 1, color: '#ffd60a', label: 'Templado',  maxTemp: 40, throttle: 0.90 },
-  serious:  { level: 2, color: '#ff9f0a', label: 'Serio',     maxTemp: 45, throttle: 0.70 },
-  critical: { level: 3, color: '#ff453a', label: 'Crítico',   maxTemp: 50, throttle: 0.40 },
-  shutdown: { level: 4, color: '#bf5af2', label: 'Apagado',   maxTemp: 60, throttle: 0.00 },
+  nominal: { level: 0, color: '#30d158', label: 'Nominal', maxTemp: 35, throttle: 1 },
+  fair: { level: 1, color: '#ffd60a', label: 'Templado', maxTemp: 40, throttle: 0.9 },
+  serious: { level: 2, color: '#ff9f0a', label: 'Serio', maxTemp: 45, throttle: 0.7 },
+  critical: { level: 3, color: '#ff453a', label: 'Crítico', maxTemp: 50, throttle: 0.4 },
+  shutdown: { level: 4, color: '#bf5af2', label: 'Apagado', maxTemp: 60, throttle: 0 },
 };
 
 export const THERMAL_SENSORS = [
-  { id: 'cpu',     label: 'CPU',          icon: 'cpu',                weight: 0.30, baseTemp: 32 },
-  { id: 'gpu',     label: 'GPU',          icon: 'square.grid.3x3',    weight: 0.20, baseTemp: 33 },
-  { id: 'battery', label: 'Batería',      icon: 'battery.100',        weight: 0.15, baseTemp: 28 },
-  { id: 'display', label: 'Pantalla',     icon: 'display',            weight: 0.10, baseTemp: 30 },
-  { id: 'radio',   label: 'Radio',        icon: 'antenna.radiowaves', weight: 0.10, baseTemp: 29 },
-  { id: 'soc',     label: 'SoC',          icon: 'cpu',                weight: 0.15, baseTemp: 34 },
+  { id: 'cpu', label: 'CPU', icon: 'cpu', weight: 0.3, baseTemp: 32 },
+  { id: 'gpu', label: 'GPU', icon: 'square.grid.3x3', weight: 0.2, baseTemp: 33 },
+  { id: 'battery', label: 'Batería', icon: 'battery.100', weight: 0.15, baseTemp: 28 },
+  { id: 'display', label: 'Pantalla', icon: 'display', weight: 0.1, baseTemp: 30 },
+  { id: 'radio', label: 'Radio', icon: 'antenna.radiowaves', weight: 0.1, baseTemp: 29 },
+  { id: 'soc', label: 'SoC', icon: 'cpu', weight: 0.15, baseTemp: 34 },
 ];
 
 export const MITIGATION = {
-  none:     { label: 'Sin mitigación',         action: 'none' },
-  cpuDown:  { label: 'Reducir CPU',            action: 'cpu' },
-  gpuDown:  { label: 'Reducir GPU',            action: 'gpu' },
-  brightDn: { label: 'Bajar brillo pantalla',  action: 'brightness' },
-  chargeOff:{ label: 'Detener carga',          action: 'charge' },
-  radioOff: { label: 'Reducir radio',          action: 'radio' },
-  full:     { label: 'Mitigación completa',    action: 'full' },
+  none: { label: 'Sin mitigación', action: 'none' },
+  cpuDown: { label: 'Reducir CPU', action: 'cpu' },
+  gpuDown: { label: 'Reducir GPU', action: 'gpu' },
+  brightDn: { label: 'Bajar brillo pantalla', action: 'brightness' },
+  chargeOff: { label: 'Detener carga', action: 'charge' },
+  radioOff: { label: 'Reducir radio', action: 'radio' },
+  full: { label: 'Mitigación completa', action: 'full' },
 };
 
 export const THERMAL_SCENARIOS = {
-  idle:      { label: 'Reposo',       load: 0.05, ambient: 22 },
-  light:     { label: 'Uso ligero',   load: 0.20, ambient: 24 },
-  normal:    { label: 'Uso normal',   load: 0.45, ambient: 25 },
-  heavy:     { label: 'Uso intenso',  load: 0.75, ambient: 27 },
-  gaming:    { label: 'Juego',        load: 0.95, ambient: 28 },
-  charging:  { label: 'Cargando',     load: 0.30, ambient: 26, charge: true },
-  benchmark: { label: 'Benchmark',    load: 1.00, ambient: 30 },
+  idle: { label: 'Reposo', load: 0.05, ambient: 22 },
+  light: { label: 'Uso ligero', load: 0.2, ambient: 24 },
+  normal: { label: 'Uso normal', load: 0.45, ambient: 25 },
+  heavy: { label: 'Uso intenso', load: 0.75, ambient: 27 },
+  gaming: { label: 'Juego', load: 0.95, ambient: 28 },
+  charging: { label: 'Cargando', load: 0.3, ambient: 26, charge: true },
+  benchmark: { label: 'Benchmark', load: 1, ambient: 30 },
 };
 
-/* ============================================================================
- * UTILIDADES
- * ========================================================================== */
-
-let _seq = 0;
-const uid = (p = 'tmp') => `${p}_${Date.now().toString(36)}_${(++_seq).toString(36)}`;
-
-function clamp(v, min, max) {
-  return Math.max(min, Math.min(max, v));
+function clamp(value, min, max) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return min;
+  return Math.max(min, Math.min(max, number));
 }
 
-function round(n, decimals = 1) {
-  const m = Math.pow(10, decimals);
-  return Math.round(n * m) / m;
+function round(value, decimals = 1) {
+  const factor = 10 ** decimals;
+  return Math.round(value * factor) / factor;
 }
 
-function now() { return Date.now(); }
-
-/* Ruido blanco determinista por sensor + tiempo */
-function noise(sensor, t) {
-  const seed = sensor.id.charCodeAt(0) * 37 + Math.floor(t / 200);
-  const x = Math.sin(seed * 12.9898) * 43758.5453;
-  return (x - Math.floor(x)) - 0.5; // [-0.5, 0.5]
+function now() {
+  return Date.now();
 }
 
-/* Estado térmico a partir de la temperatura */
-function stateFromTemp(temp) {
+function noise(sensor, timestamp) {
+  const seed = sensor.id.charCodeAt(0) * 37 + Math.floor(timestamp / 200);
+  const value = Math.sin(seed * 12.9898) * 43758.5453;
+  return (value - Math.floor(value)) - 0.5;
+}
+
+export function stateFromTemp(temp) {
   if (temp >= 55) return THERMAL_STATE.SHUTDOWN;
   if (temp >= 47) return THERMAL_STATE.CRITICAL;
   if (temp >= 43) return THERMAL_STATE.SERIOUS;
@@ -91,14 +78,54 @@ function stateFromTemp(temp) {
   return THERMAL_STATE.NOMINAL;
 }
 
-/* Throttle factor a partir del estado */
-function throttleFromState(state) {
+export function throttleFromState(state) {
   return THERMAL_LEVELS[state]?.throttle ?? 1;
 }
 
-/* ============================================================================
- * REDUCER
- * ========================================================================== */
+export function simulateThermal({
+  scenario = 'normal',
+  ambient = 25,
+  elapsed = 0,
+  prevSensors = {},
+  charging = false,
+} = {}) {
+  const selected = THERMAL_SCENARIOS[scenario] || THERMAL_SCENARIOS.normal;
+  const load = selected.load;
+  const timestamp = now();
+  const sensors = {};
+  let weightedSum = 0;
+  let totalWeight = 0;
+
+  for (const sensor of THERMAL_SENSORS) {
+    const target = sensor.baseTemp + ambient * 0.35 + load * 18
+      + (charging && sensor.id === 'battery' ? 6 : 0);
+    const previous = Number.isFinite(prevSensors[sensor.id]?.temp)
+      ? prevSensors[sensor.id].temp
+      : target - 2;
+    const inertia = sensor.id === 'battery' ? 0.02 : 0.06;
+    const temperature = previous + (target - previous) * inertia + noise(sensor, timestamp) * 0.4;
+    const temp = round(clamp(temperature, -20, 90), 1);
+
+    sensors[sensor.id] = {
+      id: sensor.id,
+      label: sensor.label,
+      icon: sensor.icon,
+      temp,
+      weight: sensor.weight,
+      t: timestamp,
+    };
+
+    weightedSum += temp * sensor.weight;
+    totalWeight += sensor.weight;
+  }
+
+  return {
+    sensors,
+    aggregate: round(weightedSum / totalWeight, 1),
+    t: timestamp,
+    elapsed,
+  };
+}
 
 const initialState = {
   ready: false,
@@ -122,73 +149,24 @@ function reducer(state, action) {
   switch (action.type) {
     case 'INIT':
       return { ...state, ...action.state, ready: true };
-
     case 'SET_SCENARIO': {
-      const sc = THERMAL_SCENARIOS[action.scenario] || THERMAL_SCENARIOS.normal;
+      const scenario = THERMAL_SCENARIOS[action.scenario] ? action.scenario : 'normal';
+      const selected = THERMAL_SCENARIOS[scenario];
       return {
         ...state,
-        scenario: action.scenario,
-        ambient: sc.ambient,
-        charging: !!sc.charge,
+        scenario,
+        ambient: selected.ambient,
+        charging: !!selected.charge,
       };
     }
-
     case 'SET_AMBIENT':
       return { ...state, ambient: clamp(action.value, -10, 50) };
-
-    case 'TICK': {
-      const s = action.payload;
-      const newState = stateFromTemp(s.aggregate);
-      const throttle = throttleFromState(newState);
-      const level = THERMAL_LEVELS[newState];
-
-      const mitigations = [];
-      if (newState === THERMAL_STATE.FAIR) {
-        mitigations.push('brightDn');
-      } else if (newState === THERMAL_STATE.SERIOUS) {
-        mitigations.push('brightDn', 'cpuDown');
-      } else if (newState === THERMAL_STATE.CRITICAL) {
-        mitigations.push('brightDn', 'cpuDown', 'gpuDown', 'chargeOff');
-      } else if (newState === THERMAL_STATE.SHUTDOWN) {
-        mitigations.push('full');
-      }
-
-      const history = [
-        ...state.history.slice(-119),
-        { t: s.t, temp: s.aggregate, state: newState },
-      ];
-
-      const peakTemp = s.aggregate > state.peakTemp ? s.aggregate : state.peakTemp;
-      const peakAt = s.aggregate > state.peakTemp ? s.t : state.peakAt;
-
-      const crossedWarn = state.state !== newState &&
-        (newState === THERMAL_STATE.SERIOUS || newState === THERMAL_STATE.CRITICAL);
-      const crossedShutdown = state.state !== newState && newState === THERMAL_STATE.SHUTDOWN;
-
-      return {
-        ...state,
-        sensors: s.sensors,
-        aggregate: s.aggregate,
-        state: newState,
-        throttle,
-        mitigations,
-        history,
-        peakTemp,
-        peakAt,
-        warnings: state.warnings + (crossedWarn ? 1 : 0),
-        shutdowns: state.shutdowns + (crossedShutdown ? 1 : 0),
-      };
-    }
-
     case 'OVERRIDE':
-      return { ...state, manualOverride: action.value };
-
+      return { ...state, manualOverride: action.value && typeof action.value === 'object' ? action.value : null };
     case 'CLEAR_OVERRIDE':
       return { ...state, manualOverride: null };
-
     case 'RESET_STATS':
       return { ...state, peakTemp: 0, peakAt: 0, warnings: 0, shutdowns: 0, history: [] };
-
     case 'SHUTDOWN':
       return {
         ...state,
@@ -197,132 +175,98 @@ function reducer(state, action) {
         throttle: 0,
         mitigations: ['full'],
       };
+    case 'TICK': {
+      const payload = action.payload;
+      const thermalState = stateFromTemp(payload.aggregate);
+      const throttle = throttleFromState(thermalState);
+      const mitigations = thermalState === THERMAL_STATE.FAIR
+        ? ['brightDn']
+        : thermalState === THERMAL_STATE.SERIOUS
+          ? ['brightDn', 'cpuDown']
+          : thermalState === THERMAL_STATE.CRITICAL
+            ? ['brightDn', 'cpuDown', 'gpuDown', 'chargeOff']
+            : thermalState === THERMAL_STATE.SHUTDOWN
+              ? ['full']
+              : [];
+      const crossedWarn = state.state !== thermalState
+        && (thermalState === THERMAL_STATE.SERIOUS || thermalState === THERMAL_STATE.CRITICAL);
+      const crossedShutdown = state.state !== thermalState && thermalState === THERMAL_STATE.SHUTDOWN;
+      const isNewPeak = payload.aggregate > state.peakTemp;
 
+      return {
+        ...state,
+        ready: true,
+        sensors: payload.sensors,
+        aggregate: payload.aggregate,
+        state: thermalState,
+        throttle,
+        mitigations,
+        history: [...state.history.slice(-119), {
+          t: payload.t,
+          temp: payload.aggregate,
+          state: thermalState,
+        }],
+        peakTemp: isNewPeak ? payload.aggregate : state.peakTemp,
+        peakAt: isNewPeak ? payload.t : state.peakAt,
+        warnings: state.warnings + (crossedWarn ? 1 : 0),
+        shutdowns: state.shutdowns + (crossedShutdown ? 1 : 0),
+      };
+    }
     default:
       return state;
   }
 }
 
-/* ============================================================================
- * MOTOR DE SIMULACIÓN
- * ========================================================================== */
-
-function simulateThermal({ scenario, ambient, elapsed, prevSensors, charging }) {
-  const sc = THERMAL_SCENARIOS[scenario] || THERMAL_SCENARIOS.normal;
-  const load = sc.load;
-  const t = now();
-
-  const sensors = {};
-  let weightedSum = 0;
-  let totalWeight = 0;
-
-  for (const s of THERMAL_SENSORS) {
-    // Temperatura objetivo del sensor
-    const target = s.baseTemp + ambient * 0.35 + load * 18 + (charging && s.id === 'battery' ? 6 : 0);
-
-    // Suavizado: la temperatura se mueve hacia el target
-    const prev = prevSensors[s.id]?.temp ?? target - 2;
-    const diff = target - prev;
-    const inertia = s.id === 'battery' ? 0.02 : 0.06;
-    const temp = prev + diff * inertia + noise(s, t) * 0.4;
-
-    sensors[s.id] = {
-      id: s.id,
-      label: s.label,
-      icon: s.icon,
-      temp: round(clamp(temp, -20, 90), 1),
-      weight: s.weight,
-      t,
-    };
-
-    weightedSum += sensors[s.id].temp * s.weight;
-    totalWeight += s.weight;
-  }
-
-  const aggregate = round(weightedSum / totalWeight, 1);
-
-  return { sensors, aggregate, t, elapsed };
-}
-
-/* ============================================================================
- * HOOK PRINCIPAL
- * ========================================================================== */
-
-function useThermal({ tickMs = 500, onEvent } = {}) {
+export function useThermal({ tickMs = 500, onEvent } = {}) {
   const [state, dispatch] = useReducer(reducer, initialState);
   const stateRef = useRef(state);
   const timerRef = useRef(null);
   const startRef = useRef(now());
   const subscribersRef = useRef(new Set());
 
-  // Mantener una referencia del estado actual para el loop
   useEffect(() => {
     stateRef.current = state;
   }, [state]);
 
-  /* --------------------------- Loop de simulación --------------------------- */
-
   useEffect(() => {
     const tick = () => {
       const current = stateRef.current;
-      const override = current.manualOverride;
-
-      let scenario = current.scenario;
-      let ambient = current.ambient;
-      if (override) {
-        scenario = override.scenario ?? scenario;
-        ambient = override.ambient ?? ambient;
-      }
-
+      const override = current.manualOverride || {};
+      const scenario = override.scenario ?? current.scenario;
+      const ambient = override.ambient ?? current.ambient;
       const result = simulateThermal({
         scenario,
         ambient,
         elapsed: now() - startRef.current,
         prevSensors: current.sensors,
-        charging: current.charging || (override && override.charging),
+        charging: current.charging || !!override.charging,
       });
-
       dispatch({ type: 'TICK', payload: result });
-
-      // Notificar a suscriptores
-      for (const fn of subscribersRef.current) {
-        try { fn(result); } catch (e) { console.error(e); }
+      for (const subscriber of subscribersRef.current) {
+        try { subscriber(result); } catch (error) { console.error(error); }
       }
     };
 
-    // Primer tick inmediato
     tick();
-
-    timerRef.current = setInterval(tick, tickMs);
+    timerRef.current = setInterval(tick, Math.max(50, Number(tickMs) || 500));
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
+      timerRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tickMs]);
 
-  /* --------------------------- Eventos al OS --------------------------- */
-
-  const prevStateRef = useRef(state.state);
+  const previousStateRef = useRef(state.state);
   useEffect(() => {
-    if (!onEvent) return;
-    if (state.state !== prevStateRef.current) {
-      const from = prevStateRef.current;
-      const to = state.state;
-      prevStateRef.current = to;
-
-      if (to === THERMAL_STATE.SERIOUS) {
-        onEvent({ type: 'thermal:serious', from, to, temp: state.aggregate });
-      } else if (to === THERMAL_STATE.CRITICAL) {
-        onEvent({ type: 'thermal:critical', from, to, temp: state.aggregate });
-      } else if (to === THERMAL_STATE.SHUTDOWN) {
-        onEvent({ type: 'thermal:shutdown', from, to, temp: state.aggregate });
-      } else if (to === THERMAL_STATE.NOMINAL) {
-        onEvent({ type: 'thermal:nominal', from, to, temp: state.aggregate });
-      }
+    if (typeof onEvent !== 'function') return;
+    if (state.state === previousStateRef.current) return;
+    const from = previousStateRef.current;
+    const to = state.state;
+    previousStateRef.current = to;
+    if (to === THERMAL_STATE.SERIOUS || to === THERMAL_STATE.CRITICAL
+      || to === THERMAL_STATE.SHUTDOWN || to === THERMAL_STATE.NOMINAL) {
+      onEvent({ type: `thermal:${to}`, from, to, temp: state.aggregate });
     }
   }, [state.state, state.aggregate, onEvent]);
-
-  /* --------------------------- API --------------------------- */
 
   const api = useMemo(() => ({
     setScenario(scenario) {
@@ -330,57 +274,29 @@ function useThermal({ tickMs = 500, onEvent } = {}) {
       dispatch({ type: 'SET_SCENARIO', scenario });
       return true;
     },
-
-    setAmbient(value) {
-      dispatch({ type: 'SET_AMBIENT', value });
-    },
-
-    setOverride(value) {
-      dispatch({ type: 'OVERRIDE', value });
-    },
-
-    clearOverride() {
-      dispatch({ type: 'CLEAR_OVERRIDE' });
-    },
-
-    forceShutdown() {
-      dispatch({ type: 'SHUTDOWN' });
-    },
-
-    resetStats() {
-      dispatch({ type: 'RESET_STATS' });
-    },
-
+    setAmbient(value) { dispatch({ type: 'SET_AMBIENT', value }); },
+    setOverride(value) { dispatch({ type: 'OVERRIDE', value }); },
+    clearOverride() { dispatch({ type: 'CLEAR_OVERRIDE' }); },
+    forceShutdown() { dispatch({ type: 'SHUTDOWN' }); },
+    resetStats() { dispatch({ type: 'RESET_STATS' }); },
     subscribe(fn) {
+      if (typeof fn !== 'function') return () => {};
       subscribersRef.current.add(fn);
       return () => subscribersRef.current.delete(fn);
     },
-
-    getState() {
-      return stateRef.current;
-    },
-
-    getSensors() {
-      return Object.values(stateRef.current.sensors);
-    },
-
-    getSensor(id) {
-      return stateRef.current.sensors[id] || null;
-    },
+    getState() { return stateRef.current; },
+    getSensors() { return Object.values(stateRef.current.sensors); },
+    getSensor(id) { return stateRef.current.sensors[id] || null; },
   }), []);
 
   return { state, dispatch, api };
 }
 
-/* ============================================================================
- * HOOKS AUXILIARES
- * ========================================================================== */
-
-function useThermalState(state) {
+export function useThermalState(state) {
   return THERMAL_LEVELS[state] || THERMAL_LEVELS.nominal;
 }
 
-function useThermalColor(temp) {
+export function useThermalColor(temp) {
   if (temp >= 50) return '#bf5af2';
   if (temp >= 45) return '#ff453a';
   if (temp >= 40) return '#ff9f0a';
@@ -388,69 +304,52 @@ function useThermalColor(temp) {
   return '#30d158';
 }
 
-/* ============================================================================
- * COMPONENTES REUTILIZABLES
- * ========================================================================== */
-
-function ThermalBar({ temp, max = 60, height = 6, showLabel = false }) {
+export function ThermalBar({ temp = 0, max = 60, height = 6, showLabel = false }) {
   const color = useThermalColor(temp);
   const pct = clamp((temp / max) * 100, 0, 100);
   return (
     <div className="vt-bar-wrap">
       <div className="vt-bar" style={{ height }}>
-        <div
-          className="vt-bar-fill"
-          style={{ width: `${pct}%`, background: color }}
-        />
+        <div className="vt-bar-fill" style={{ width: `${pct}%`, background: color }} />
       </div>
-      {showLabel && (
-        <span className="vt-bar-label" style={{ color }}>
-          {round(temp, 1)} °C
-        </span>
-      )}
+      {showLabel && <span className="vt-bar-label" style={{ color }}>{round(temp, 1)} °C</span>}
     </div>
   );
 }
 
-function ThermalChip({ state }) {
+export function ThermalChip({ state }) {
   const meta = THERMAL_LEVELS[state] || THERMAL_LEVELS.nominal;
-  return (
-    <span className="vt-chip" style={{ background: meta.color }}>
-      {meta.label}
-    </span>
-  );
+  return <span className="vt-chip" style={{ background: meta.color }}>{meta.label}</span>;
 }
 
-function ThermalSensorRow({ sensor }) {
-  const color = useThermalColor(sensor.temp);
+export function ThermalSensorRow({ sensor }) {
+  const safeSensor = sensor || { label: 'Sensor', temp: 0 };
+  const color = useThermalColor(safeSensor.temp);
   return (
     <div className="vt-sensor-row">
-      <span className="vt-sensor-label">{sensor.label}</span>
+      <span className="vt-sensor-label">{safeSensor.label}</span>
       <div className="vt-sensor-bar">
         <div
           className="vt-sensor-bar-fill"
-          style={{ width: `${clamp((sensor.temp / 60) * 100, 0, 100)}%`, background: color }}
+          style={{ width: `${clamp((safeSensor.temp / 60) * 100, 0, 100)}%`, background: color }}
         />
       </div>
-      <span className="vt-sensor-temp" style={{ color }}>
-        {sensor.temp.toFixed(1)}°
-      </span>
+      <span className="vt-sensor-temp" style={{ color }}>{round(safeSensor.temp, 1)}°</span>
     </div>
   );
 }
 
-/* ============================================================================
- * CLASE VThermal — driver para el HardwareBus
- * ========================================================================== */
-
-class VThermalDriver {
-  constructor(opts = {}) {
+export class VThermalDriver {
+  constructor(options = {}) {
     this.name = 'VThermal';
-    this.version = '1.0.0';
-    this.tickMs = opts.tickMs || 500;
+    this.version = '1.1.0';
+    this.bus = options && typeof options === 'object' ? options : null;
+    this.tickMs = Math.max(50, Number(options?.tickMs) || 500);
     this.startRef = now();
     this.timer = null;
     this.listeners = new Set();
+    this.links = new Map();
+    this.charging = false;
     this.state = {
       scenario: 'normal',
       ambient: 25,
@@ -460,21 +359,27 @@ class VThermalDriver {
       throttle: 1,
       mitigations: [],
       peakTemp: 0,
+      peakAt: 0,
     };
-    this.charging = false;
   }
 
   probe() {
     return {
       ok: true,
       name: this.name,
-      sensors: THERMAL_SENSORS.map((s) => s.id),
+      version: this.version,
+      sensors: THERMAL_SENSORS.map((sensor) => sensor.id),
       scenario: this.state.scenario,
+      temperatureC: this.state.aggregate,
     };
   }
 
+  powerOn() { this.start(); return this.probe(); }
+
+  powerOff() { this.stop(); return true; }
+
   start() {
-    if (this.timer) return;
+    if (this.timer) return this;
     const tick = () => {
       const result = simulateThermal({
         scenario: this.state.scenario,
@@ -483,102 +388,97 @@ class VThermalDriver {
         prevSensors: this.state.sensors,
         charging: this.charging,
       });
-
-      const newState = stateFromTemp(result.aggregate);
-      const throttle = throttleFromState(newState);
-
+      const thermalState = stateFromTemp(result.aggregate);
       this.state = {
         ...this.state,
         sensors: result.sensors,
         aggregate: result.aggregate,
-        state: newState,
-        throttle,
+        state: thermalState,
+        throttle: throttleFromState(thermalState),
+        mitigations: thermalState === THERMAL_STATE.SHUTDOWN ? ['full'] : [],
         peakTemp: Math.max(this.state.peakTemp, result.aggregate),
+        peakAt: result.aggregate >= this.state.peakTemp ? result.t : this.state.peakAt,
       };
-
-      for (const fn of this.listeners) {
-        try { fn(this.state); } catch (e) { console.error(e); }
+      for (const listener of this.listeners) {
+        try { listener(this.state); } catch (error) { console.error(error); }
+      }
+      if (thermalState === THERMAL_STATE.SHUTDOWN && this.bus?.raiseIRQ) {
+        this.bus.raiseIRQ(21, { kind: 'shutdown', tempC: result.aggregate });
       }
     };
-
     tick();
     this.timer = setInterval(tick, this.tickMs);
+    return this;
   }
 
   stop() {
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = null;
-    }
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+    return this;
   }
 
-  read() {
-    return this.state;
-  }
-
-  readSensor(id) {
-    return this.state.sensors[id] || null;
-  }
-
-  readAll() {
-    return Object.values(this.state.sensors);
-  }
+  read() { return this.state; }
+  readSensor(id) { return this.state.sensors[id] || null; }
+  readAll() { return Object.values(this.state.sensors); }
+  getThrottle() { return this.state.throttle; }
+  getState() { return this.state.state; }
 
   setScenario(scenario) {
     if (!THERMAL_SCENARIOS[scenario]) return false;
-    const sc = THERMAL_SCENARIOS[scenario];
+    const selected = THERMAL_SCENARIOS[scenario];
     this.state.scenario = scenario;
-    this.state.ambient = sc.ambient;
-    this.charging = !!sc.charge;
+    this.state.ambient = selected.ambient;
+    this.charging = !!selected.charge;
     return true;
   }
 
   setAmbient(value) {
     this.state.ambient = clamp(value, -10, 50);
-  }
-
-  getThrottle() {
-    return this.state.throttle;
-  }
-
-  getState() {
-    return this.state.state;
+    return this.state.ambient;
   }
 
   subscribe(fn) {
+    if (typeof fn !== 'function') return () => {};
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);
   }
 
   shutdown() {
-    this.state.state = THERMAL_STATE.SHUTDOWN;
-    this.state.aggregate = 60;
-    this.state.throttle = 0;
-    for (const fn of this.listeners) {
-      try { fn(this.state); } catch (e) { console.error(e); }
+    this.state = {
+      ...this.state,
+      state: THERMAL_STATE.SHUTDOWN,
+      aggregate: 60,
+      throttle: 0,
+      mitigations: ['full'],
+      peakTemp: Math.max(this.state.peakTemp, 60),
+      peakAt: now(),
+    };
+    for (const listener of this.listeners) {
+      try { listener(this.state); } catch (error) { console.error(error); }
     }
   }
 
   destroy() {
     this.stop();
     this.listeners.clear();
+    this.links.clear();
   }
+
+  link(name, driver) {
+    if (driver) this.links.set(name, driver);
+    return this;
+  }
+
+  linkCPU(driver) { return this.link('cpu', driver); }
+  linkGPU(driver) { return this.link('gpu', driver); }
+  linkStorage(driver) { return this.link('storage', driver); }
+  linkBattery(driver) { return this.link('battery', driver); }
+  linkWiFi(driver) { return this.link('wifi', driver); }
+  linkBT(driver) { return this.link('bt', driver); }
+  linkCellular(driver) { return this.link('cellular', driver); }
+  linkDisplay(driver) { return this.link('display', driver); }
 }
 
-/* ============================================================================
- * EXPORTS
- * ========================================================================== */
-
-export {
-  VThermalDriver,
-  useThermal,
-  useThermalState,
-  useThermalColor,
-  simulateThermal,
-  stateFromTemp,
-  throttleFromState,
-  ThermalBar,
-  ThermalChip,
-  ThermalSensorRow,
-  VThermal
-};
+// HardwareBus imports { VThermal } and instantiates it as a driver.
+// Keep the public name as a class alias so the named import is always defined.
+export const VThermal = VThermalDriver;
