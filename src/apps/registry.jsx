@@ -1,851 +1,1238 @@
 // src/apps/registry.jsx
-// ─────────────────────────────────────────────────────────────────────────────
-// iOS Remastered — registry
-//
-// Registro central de apps del sistema. Es la fuente de verdad para:
-//   • La lista de apps instaladas (usada por Springboard, StatusBar, etc.).
-//   • El icono, nombre, colores y metadata de cada app.
-//   • El componente render que AppWindow monta al abrir.
-//   • Las pages del Springboard (qué apps en qué página).
-//   • El Dock (qué apps fijas abajo).
-//   • Los permisos/entitlements que la app declara.
-//   • La vinculación con LaunchServices del IPAInstaller para apps instaladas.
-//
-// El registro se compone de dos partes:
-//   1. SYSTEM_APPS  → apps nativas de iOS Remastered (definidas aquí).
-//   2. USER_APPS    → apps instaladas vía IPA (inyectadas en runtime).
-//
-// Uso:
-//   import registry, { useRegistry } from './registry.jsx';
-//
-//   const apps = useRegistry();              // todas las apps (sistema + user)
-//   const app  = registry.get('settings');   // una app por id
-//   registry.register(userApp);              // registrar una app IPA
-//   registry.unregister('com.x.y');          // desinstalar
-//
-// Sin librerías externas.
-// ─────────────────────────────────────────────────────────────────────────────
+// iOS Remastered — Registro central de aplicaciones
+// Catálogo completo de apps del sistema, páginas del Springboard, Dock,
+// entitlements, lazy loading, store reactivo con subscribe, hooks y API.
+// Sin dependencias externas.
 
-import React, { useEffect, useMemo, useState } from 'react';
-import { useOS } from '../context/OSContext.jsx';
+import React, {
+  useState, useEffect, useMemo, useCallback,
+} from 'react';
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Iconos SVG inline (mini-biblioteca local para no depender de Icon.jsx
-// en el registro, que debe poder importarse incluso sin la capa UI cargada)
-// ─────────────────────────────────────────────────────────────────────────────
+/* ============================================================================
+ * LAZY LOADING DE APPS
+ * Cada app se carga bajo demanda vía React.lazy cuando el usuario la abre.
+ * ========================================================================== */
 
-const glyphStyle = { display: 'block', color: '#fff' };
+const lazy = (loader) => React.lazy(loader);
 
-function GlyphSettings({ size = 30 }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" style={glyphStyle}>
-      <circle cx="12" cy="12" r="3.4" stroke="#fff" strokeWidth="1.8" fill="none" />
-      <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" stroke="#fff" strokeWidth="1.6" fill="none" />
-    </svg>
-  );
-}
-
-function GlyphCalculator({ size = 30 }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" style={glyphStyle}>
-      <rect x="5" y="3" width="14" height="18" rx="2" stroke="#fff" strokeWidth="1.8" fill="none" />
-      <rect x="7" y="5" width="10" height="4" rx="1" fill="#fff" opacity="0.55" />
-      <circle cx="9" cy="13" r="0.9" fill="#fff" />
-      <circle cx="12" cy="13" r="0.9" fill="#fff" />
-      <circle cx="15" cy="13" r="0.9" fill="#fff" />
-      <circle cx="9" cy="17" r="0.9" fill="#fff" />
-      <circle cx="12" cy="17" r="0.9" fill="#fff" />
-      <circle cx="15" cy="17" r="0.9" fill="#fff" />
-    </svg>
-  );
-}
-
-function GlyphNotes({ size = 30 }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" style={glyphStyle}>
-      <rect x="5" y="3" width="14" height="18" rx="2" stroke="#fff" strokeWidth="1.8" fill="none" />
-      <path d="M8 8 H16 M8 12 H16 M8 16 H13" stroke="#fff" strokeWidth="1.8" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function GlyphPhotos({ size = 30 }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" style={glyphStyle}>
-      <rect x="3" y="5" width="18" height="14" rx="2" stroke="#fff" strokeWidth="1.8" fill="none" />
-      <path d="M3 16 L9 10 L13 14 L17 10 L21 14" stroke="#fff" strokeWidth="1.8" fill="none" strokeLinecap="round" strokeLinejoin="round" />
-      <circle cx="16" cy="8" r="1.5" fill="#fff" />
-    </svg>
-  );
-}
-
-function GlyphTerminal({ size = 30 }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" style={glyphStyle}>
-      <rect x="3" y="4" width="18" height="16" rx="2" stroke="#fff" strokeWidth="1.8" fill="none" />
-      <path d="M7 10 L10 13 L7 16" stroke="#fff" strokeWidth="1.8" fill="none" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M12 16 H17" stroke="#fff" strokeWidth="1.8" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function GlyphMachO({ size = 30 }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" style={glyphStyle}>
-      <path d="M5 3 H14 L19 8 V21 H5 Z" stroke="#fff" strokeWidth="1.8" fill="none" strokeLinejoin="round" />
-      <path d="M14 3 V8 H19" stroke="#fff" strokeWidth="1.8" fill="none" strokeLinejoin="round" />
-      <circle cx="12" cy="15" r="2" stroke="#fff" strokeWidth="1.6" fill="none" />
-      <path d="M12 13 V11 M12 17 V19 M10 15 H8 M14 15 H16" stroke="#fff" strokeWidth="1.6" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function GlyphHardware({ size = 30 }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" style={glyphStyle}>
-      <rect x="5" y="5" width="14" height="14" rx="2" stroke="#fff" strokeWidth="1.8" fill="none" />
-      <rect x="9" y="9" width="6" height="6" rx="1" fill="#fff" opacity="0.7" />
-      <path d="M9 2 V5 M15 2 V5 M9 19 V22 M15 19 V22 M2 9 H5 M2 15 H5 M19 9 H22 M19 15 H22" stroke="#fff" strokeWidth="1.6" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function GlyphClock({ size = 30 }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" style={glyphStyle}>
-      <circle cx="12" cy="12" r="9" stroke="#fff" strokeWidth="1.8" fill="none" />
-      <path d="M12 6 V12 L16 14" stroke="#fff" strokeWidth="1.8" fill="none" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M12 2 V3 M12 21 V22 M2 12 H3 M21 12 H22" stroke="#fff" strokeWidth="1.6" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function GlyphWeather({ size = 30 }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" style={glyphStyle}>
-      <circle cx="12" cy="12" r="4" fill="#fff" />
-      <path d="M12 2 V5 M12 19 V22 M2 12 H5 M19 12 H22 M5 5 L7 7 M17 17 L19 19 M5 19 L7 17 M17 7 L19 5" stroke="#fff" strokeWidth="1.8" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function GlyphFiles({ size = 30 }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" style={glyphStyle}>
-      <path d="M3 6 H8 L10 8 H21 V19 H3 Z" stroke="#fff" strokeWidth="1.8" fill="none" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function GlyphInstaller({ size = 30 }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" style={glyphStyle}>
-      <path d="M12 3 V15" stroke="#fff" strokeWidth="2" strokeLinecap="round" />
-      <path d="M7 10 L12 15 L17 10" stroke="#fff" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M4 17 V20 A1 1 0 0 0 5 21 H19 A1 1 0 0 0 20 20 V17" stroke="#fff" strokeWidth="1.8" fill="none" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function GlyphSafari({ size = 30 }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" style={glyphStyle}>
-      <circle cx="12" cy="12" r="10" stroke="#fff" strokeWidth="1.8" fill="none" />
-      <path d="M16 8 L14 14 L8 16 L10 10 Z" fill="#fff" />
-    </svg>
-  );
-}
-
-function GlyphMessages({ size = 30 }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" style={glyphStyle}>
-      <path d="M4 5 H20 A2 2 0 0 1 22 7 V16 A2 2 0 0 1 20 18 H11 L6 22 V18 H4 A2 2 0 0 1 2 16 V7 A2 2 0 0 1 4 5 Z" stroke="#fff" strokeWidth="1.8" fill="none" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function GlyphPhone({ size = 30 }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" style={glyphStyle}>
-      <path d="M5 4 h4 l2 5 -2.5 1.5 a12 12 0 0 0 5 5 L15 13 l5 2 v4 a2 2 0 0 1 -2 2 A16 16 0 0 1 3 6 a2 2 0 0 1 2 -2 z" fill="#fff" />
-    </svg>
-  );
-}
-
-function GlyphMusic({ size = 30 }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" style={glyphStyle}>
-      <path d="M9 18 V6 L20 4 V16" stroke="#fff" strokeWidth="1.8" fill="none" strokeLinecap="round" strokeLinejoin="round" />
-      <circle cx="6" cy="18" r="3" stroke="#fff" strokeWidth="1.8" fill="none" />
-      <circle cx="17" cy="16" r="3" stroke="#fff" strokeWidth="1.8" fill="none" />
-    </svg>
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Entitlements estándar por categoría
-// ─────────────────────────────────────────────────────────────────────────────
-
-const ENTITLEMENTS = {
-  NONE: [],
-  CAMERA: ['com.apple.private.camera'],
-  MICROPHONE: ['com.apple.private.microphone'],
-  LOCATION: ['com.apple.private.location'],
-  PHOTOS: ['com.apple.private.photos.read', 'com.apple.private.photos.write'],
-  NETWORK: ['com.apple.private.network.client'],
-  FILE_ACCESS: ['com.apple.private.filesystem.user'],
-  FULL_DISK: ['com.apple.private.filesystem.all'],
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Helpers de definición
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Normaliza una definición de app. Todos los campos son opcionales salvo id y
- * name. Rellena defaults sensatos.
- */
-function defineApp(def) {
-  const {
-    id,
-    name,
-    glyph,
-    emoji,
-    color,
-    icon,
-    render,
-    permissions = [],
-    pages = 1,
-    dock = false,
-    system = true,
-    statusBarTheme = 'auto',
-    supportsMultitasking = false,
-    category = 'utilities',
-    hidden = false,
-    minOSVersion = '1.0',
-    version = '1.0.0',
-    developer = 'Apple',
-    bundleId,
-  } = def;
-  return {
-    id,
-    name,
-    glyph,
-    emoji,
-    color: color || 'linear-gradient(160deg, #8e8e93, #48484a)',
-    icon: icon || glyph,
-    render,
-    permissions,
-    entitlements: permissions,
-    pages,
-    dock,
-    system,
-    statusBarTheme,
-    supportsMultitasking,
-    category,
-    hidden,
-    minOSVersion,
-    version,
-    developer,
-    bundleId: bundleId || id,
-  };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Definición de las apps del sistema
-// Cada entrada puede tener un `render` que AppWindow usará al abrir.
-// Los `render` concretos viven en sus propios archivos (Settings.jsx, etc.);
-// aquí se hace import dinámico con React.lazy() para no cargar todo de golpe.
-// ─────────────────────────────────────────────────────────────────────────────
-
-// Lazy imports (cada app se carga solo cuando se abre)
-const LazySettings = React.lazy(() => import('./Settings.jsx'));
-const LazyCalculator = React.lazy(() => import('./Calculator.jsx'));
-const LazyNotes = React.lazy(() => import('./Notes.jsx'));
-const LazyPhotos = React.lazy(() => import('./Photos.jsx'));
-const LazyTerminal = React.lazy(() => import('./Terminal.jsx'));
-const LazyMachOViewer = React.lazy(() => import('./MachOViewer.jsx'));
-const LazyHardwareMonitor = React.lazy(() => import('./HardwareMonitor.jsx'));
-const LazyClock = React.lazy(() => import('./Clock.jsx').catch(() => ({ default: () => null })));
-const LazyWeather = React.lazy(() => import('./Weather.jsx').catch(() => ({ default: () => null })));
-const LazyFiles = React.lazy(() => import('./Files.jsx').catch(() => ({ default: () => null })));
-const LazySafari = React.lazy(() => import('./Safari.jsx').catch(() => ({ default: () => null })));
-const LazyInstaller = React.lazy(() => import('./Installer.jsx').catch(() => ({ default: () => null })));
-
-/** Fallback mientras carga el chunk de la app. */
-function AppLoading() {
-  return (
-    <div
-      style={{
-        position: 'absolute',
-        inset: 0,
-        background: '#000',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        color: 'rgba(255,255,255,0.7)',
-        fontSize: 13,
-      }}
-    >
-      Cargando…
-    </div>
-  );
-}
-
-/** Helper para envolver un lazy component en <Suspense>. */
-function lazyRender(Component) {
-  return (props) => (
-    <React.Suspense fallback={<AppLoading />}>
-      <Component {...props} />
-    </React.Suspense>
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// APPS DEL SISTEMA
-// ─────────────────────────────────────────────────────────────────────────────
+/* ============================================================================
+ * DEFINICIÓN DE APPS DEL SISTEMA
+ * ========================================================================== */
 
 export const SYSTEM_APPS = [
-  defineApp({
-    id: 'com.apple.mobilesafari',
-    name: 'Safari',
-    glyph: <GlyphSafari />,
-    color: 'linear-gradient(160deg, #5ac8fa, #007aff)',
-    render: lazyRender(LazySafari),
-    permissions: [ENTITLEMENTS.NETWORK],
-    category: 'internet',
-    statusBarTheme: 'light',
-    pages: 1,
-  }),
-  defineApp({
-    id: 'com.apple.mobilephone',
-    name: 'Teléfono',
-    glyph: <GlyphPhone />,
-    color: 'linear-gradient(160deg, #30d158, #34c759)',
-    render: null,
-    permissions: [ENTITLEMENTS.NETWORK, ENTITLEMENTS.MICROPHONE],
-    category: 'communication',
+  /* ============================ PRIMERA PANTALLA ============================ */
+  {
+    bundleId: 'com.apple.springboard',
+    name: 'SpringBoard',
+    displayName: 'Inicio',
+    version: '1.0.0',
+    icon: 'house',
+    color: '#8e8e93',
+    category: 'system',
+    hidden: true,
+    system: true,
+    singleton: true,
+    noUninstall: true,
+    loader: null,
+  },
+
+  /* ============================ COMUNICACIÓN ============================ */
+  {
+    bundleId: 'com.apple.mobilephone',
+    name: 'Phone',
+    displayName: 'Teléfono',
+    version: '1.0.0',
+    icon: 'phone.fill',
+    color: '#30d158',
+    gradient: ['#30d158', '#0a84ff'],
+    category: 'social',
+    defaultPage: 0,
+    defaultSlot: 0,
     dock: true,
-  }),
-  defineApp({
-    id: 'com.apple.MobileSMS',
-    name: 'Mensajes',
-    glyph: <GlyphMessages />,
-    color: 'linear-gradient(160deg, #30d158, #34c759)',
-    render: null,
-    permissions: [ENTITLEMENTS.NETWORK],
-    category: 'communication',
+    entitlements: ['telephony', 'contacts.read', 'microphone'],
+    loader: () => import('./Phone.jsx'),
+  },
+  {
+    bundleId: 'com.apple.MobileSMS',
+    name: 'Messages',
+    displayName: 'Mensajes',
+    version: '1.0.0',
+    icon: 'message.fill',
+    color: '#30d158',
+    gradient: ['#30d158', '#34c759'],
+    category: 'social',
+    defaultPage: 0,
+    defaultSlot: 1,
     dock: true,
-    statusBarTheme: 'light',
-  }),
-  defineApp({
-    id: 'com.apple.mobilemail',
+    entitlements: ['messages.read', 'messages.send', 'contacts.read'],
+    loader: () => import('./Messages.jsx'),
+  },
+  {
+    bundleId: 'com.apple.mobilemail',
     name: 'Mail',
-    glyph: (
-      <svg width="30" height="30" viewBox="0 0 24 24" fill="none" style={glyphStyle}>
-        <rect x="3" y="6" width="18" height="12" rx="2" stroke="#fff" strokeWidth="1.8" fill="none" />
-        <path d="M3 7 L12 13 L21 7" stroke="#fff" strokeWidth="1.8" fill="none" strokeLinecap="round" strokeLinejoin="round" />
-      </svg>
-    ),
-    color: 'linear-gradient(160deg, #5ac8fa, #007aff)',
-    render: null,
-    permissions: [ENTITLEMENTS.NETWORK],
-    category: 'communication',
-  }),
-  defineApp({
-    id: 'com.apple.mobileslideshow',
-    name: 'Fotos',
-    glyph: <GlyphPhotos />,
-    color: 'linear-gradient(160deg, #ffcc00, #ff9500)',
-    render: lazyRender(LazyPhotos),
-    permissions: [ENTITLEMENTS.PHOTOS],
-    category: 'media',
-    statusBarTheme: 'light',
-  }),
-  defineApp({
-    id: 'com.apple.Music',
-    name: 'Música',
-    glyph: <GlyphMusic />,
-    color: 'linear-gradient(160deg, #ff2d55, #ff6482)',
-    render: null,
-    permissions: [],
-    category: 'media',
+    displayName: 'Correo',
+    version: '1.0.0',
+    icon: 'envelope.fill',
+    color: '#0a84ff',
+    gradient: ['#0a84ff', '#5e5ce6'],
+    category: 'productivity',
+    defaultPage: 1,
+    entitlements: ['mail.read', 'mail.send', 'network'],
+    loader: () => import('./Mail.jsx'),
+  },
+  {
+    bundleId: 'com.apple.FaceTime',
+    name: 'FaceTime',
+    displayName: 'FaceTime',
+    version: '1.0.0',
+    icon: 'video.fill',
+    color: '#30d158',
+    gradient: ['#30d158', '#30d158'],
+    category: 'social',
+    defaultPage: 1,
+    entitlements: ['camera', 'microphone', 'network'],
+    loader: () => import('./FaceTime.jsx'),
+  },
+  {
+    bundleId: 'com.apple.Contacts',
+    name: 'Contacts',
+    displayName: 'Contactos',
+    version: '1.0.0',
+    icon: 'person.crop.circle.fill',
+    color: '#8e8e93',
+    category: 'productivity',
+    defaultPage: 2,
+    entitlements: ['contacts.read', 'contacts.write'],
+    loader: () => import('./Contacts.jsx'),
+  },
+
+  /* ============================ MEDIA ============================ */
+  {
+    bundleId: 'com.apple.mobilesafari',
+    name: 'Safari',
+    displayName: 'Safari',
+    version: '1.0.0',
+    icon: 'safari.fill',
+    color: '#0a84ff',
+    gradient: ['#0a84ff', '#64d2ff'],
+    category: 'productivity',
+    defaultPage: 0,
+    defaultSlot: 2,
     dock: true,
-    statusBarTheme: 'light',
-  }),
-  defineApp({
-    id: 'com.apple.mobiletimer',
-    name: 'Reloj',
-    glyph: <GlyphClock />,
-    color: 'linear-gradient(160deg, #1c1c1e, #3a3a3c)',
-    render: lazyRender(LazyClock),
-    permissions: [],
-    category: 'utilities',
-    statusBarTheme: 'light',
-  }),
-  defineApp({
-    id: 'com.apple.weather',
-    name: 'Tiempo',
-    glyph: <GlyphWeather />,
-    color: 'linear-gradient(160deg, #5ac8fa, #007aff)',
-    render: lazyRender(LazyWeather),
-    permissions: [ENTITLEMENTS.LOCATION, ENTITLEMENTS.NETWORK],
-    category: 'utilities',
-    statusBarTheme: 'light',
-  }),
-  defineApp({
-    id: 'com.apple.mobilenotes',
-    name: 'Notas',
-    glyph: <GlyphNotes />,
-    color: 'linear-gradient(160deg, #ffcc00, #ff9500)',
-    render: lazyRender(LazyNotes),
-    permissions: [],
+    entitlements: ['network', 'downloads', 'history'],
+    loader: () => import('./Safari.jsx'),
+  },
+  {
+    bundleId: 'com.apple.mobileslideshow',
+    name: 'Photos',
+    displayName: 'Fotos',
+    version: '1.0.0',
+    icon: 'photo.on.rectangle.angled',
+    color: '#ff375f',
+    gradient: ['#ff9f0a', '#ff375f', '#bf5af2'],
+    category: 'media',
+    defaultPage: 0,
+    defaultSlot: 3,
+    dock: true,
+    entitlements: ['photos.read', 'photos.write', 'camera'],
+    loader: () => import('./Photos.jsx'),
+  },
+  {
+    bundleId: 'com.apple.camera',
+    name: 'Camera',
+    displayName: 'Cámara',
+    version: '1.0.0',
+    icon: 'camera.fill',
+    color: '#8e8e93',
+    category: 'media',
+    defaultPage: 0,
+    entitlements: ['camera', 'microphone', 'photos.write'],
+    loader: () => import('./Camera.jsx'),
+  },
+  {
+    bundleId: 'com.apple.Music',
+    name: 'Music',
+    displayName: 'Música',
+    version: '1.0.0',
+    icon: 'music.note',
+    color: '#ff375f',
+    gradient: ['#ff375f', '#ff6482'],
+    category: 'media',
+    defaultPage: 1,
+    entitlements: ['audio', 'library.read'],
+    loader: () => import('./Music.jsx'),
+  },
+  {
+    bundleId: 'com.apple.podcasts',
+    name: 'Podcasts',
+    displayName: 'Podcasts',
+    version: '1.0.0',
+    icon: 'mic.fill',
+    color: '#bf5af2',
+    category: 'media',
+    defaultPage: 1,
+    entitlements: ['audio', 'network'],
+    loader: () => import('./Podcasts.jsx'),
+  },
+  {
+    bundleId: 'com.apple.tv',
+    name: 'TV',
+    displayName: 'TV',
+    version: '1.0.0',
+    icon: 'tv.fill',
+    color: '#000000',
+    category: 'media',
+    defaultPage: 2,
+    entitlements: ['video', 'network'],
+    loader: () => import('./TV.jsx'),
+  },
+  {
+    bundleId: 'com.apple.Photos',
+    name: 'Videos',
+    displayName: 'Vídeos',
+    version: '1.0.0',
+    icon: 'video.rectangle.fill',
+    color: '#8e8e93',
+    category: 'media',
+    hidden: true,
+    loader: null,
+  },
+
+  /* ============================ PRODUCTIVIDAD ============================ */
+  {
+    bundleId: 'com.apple.mobilenotes',
+    name: 'Notes',
+    displayName: 'Notas',
+    version: '4.2.0',
+    icon: 'note.text',
+    color: '#ffd60a',
+    gradient: ['#ffd60a', '#ff9f0a'],
     category: 'productivity',
-    statusBarTheme: 'light',
-  }),
-  defineApp({
-    id: 'com.apple.calculator',
-    name: 'Calculadora',
-    glyph: <GlyphCalculator />,
-    color: 'linear-gradient(160deg, #8e8e93, #48484a)',
-    render: lazyRender(LazyCalculator),
-    permissions: [],
-    category: 'utilities',
-  }),
-  defineApp({
-    id: 'com.apple.Preferences',
-    name: 'Ajustes',
-    glyph: <GlyphSettings />,
-    color: 'linear-gradient(160deg, #8e8e93, #48484a)',
-    render: lazyRender(LazySettings),
-    permissions: [ENTITLEMENTS.FULL_DISK],
-    category: 'system',
-    statusBarTheme: 'light',
-  }),
-  defineApp({
-    id: 'com.apple.files',
-    name: 'Archivos',
-    glyph: <GlyphFiles />,
-    color: 'linear-gradient(160deg, #5ac8fa, #0a84ff)',
-    render: lazyRender(LazyFiles),
-    permissions: [ENTITLEMENTS.FILE_ACCESS],
+    defaultPage: 1,
+    entitlements: ['documents', 'icloud'],
+    loader: () => import('./Notes.jsx'),
+  },
+  {
+    bundleId: 'com.apple.reminders',
+    name: 'Reminders',
+    displayName: 'Recordatorios',
+    version: '1.0.0',
+    icon: 'checklist',
+    color: '#0a84ff',
     category: 'productivity',
-    statusBarTheme: 'light',
-  }),
-  defineApp({
-    id: 'com.apple.Terminal',
-    name: 'Terminal',
-    glyph: <GlyphTerminal />,
-    color: 'linear-gradient(160deg, #1c1c1e, #000)',
-    render: lazyRender(LazyTerminal),
-    permissions: [ENTITLEMENTS.FULL_DISK],
-    category: 'developer',
-    developer: 'iOS Remastered',
-  }),
-  defineApp({
-    id: 'com.iosremastered.machoviewer',
-    name: 'Mach-O',
-    glyph: <GlyphMachO />,
-    color: 'linear-gradient(160deg, #af52de, #5856d6)',
-    render: lazyRender(LazyMachOViewer),
-    permissions: [ENTITLEMENTS.FULL_DISK],
-    category: 'developer',
-    developer: 'iOS Remastered',
-  }),
-  defineApp({
-    id: 'com.iosremastered.hardware',
-    name: 'Hardware',
-    glyph: <GlyphHardware />,
-    color: 'linear-gradient(160deg, #ff375f, #af52de)',
-    render: lazyRender(LazyHardwareMonitor),
-    permissions: [ENTITLEMENTS.FULL_DISK],
-    category: 'developer',
-    developer: 'iOS Remastered',
-  }),
-  defineApp({
-    id: 'com.iosremastered.installer',
-    name: 'Instalador',
-    glyph: <GlyphInstaller />,
-    color: 'linear-gradient(160deg, #34c759, #30b0c7)',
-    render: lazyRender(LazyInstaller),
-    permissions: [ENTITLEMENTS.FULL_DISK, ENTITLEMENTS.NETWORK],
+    defaultPage: 1,
+    entitlements: ['reminders.read', 'reminders.write'],
+    loader: () => import('./Reminders.jsx'),
+  },
+  {
+    bundleId: 'com.apple.calendar',
+    name: 'Calendar',
+    displayName: 'Calendario',
+    version: '1.0.0',
+    icon: 'calendar',
+    color: '#ff453a',
+    category: 'productivity',
+    defaultPage: 2,
+    entitlements: ['calendar.read', 'calendar.write'],
+    loader: () => import('./Calendar.jsx'),
+  },
+  {
+    bundleId: 'com.apple.iWork.Pages',
+    name: 'Pages',
+    displayName: 'Pages',
+    version: '1.0.0',
+    icon: 'doc.richtext',
+    color: '#ff9f0a',
+    category: 'productivity',
+    defaultPage: 3,
+    entitlements: ['documents'],
+    loader: () => import('./Pages.jsx'),
+  },
+  {
+    bundleId: 'com.apple.iWork.Numbers',
+    name: 'Numbers',
+    displayName: 'Numbers',
+    version: '1.0.0',
+    icon: 'tablecells',
+    color: '#30d158',
+    category: 'productivity',
+    defaultPage: 3,
+    entitlements: ['documents'],
+    loader: () => import('./Numbers.jsx'),
+  },
+  {
+    bundleId: 'com.apple.iWork.Keynote',
+    name: 'Keynote',
+    displayName: 'Keynote',
+    version: '1.0.0',
+    icon: 'rectangle.on.rectangle',
+    color: '#0a84ff',
+    category: 'productivity',
+    defaultPage: 3,
+    entitlements: ['documents'],
+    loader: () => import('./Keynote.jsx'),
+  },
+  {
+    bundleId: 'com.apple.freeform',
+    name: 'Freeform',
+    displayName: 'Freeform',
+    version: '1.0.0',
+    icon: 'scribble',
+    color: '#ffd60a',
+    category: 'productivity',
+    defaultPage: 3,
+    entitlements: ['documents'],
+    loader: () => import('./Freeform.jsx'),
+  },
+
+  /* ============================ UTILIDADES ============================ */
+  {
+    bundleId: 'com.apple.calculator',
+    name: 'Calculator',
+    displayName: 'Calculadora',
+    version: '1.0.0',
+    icon: 'plus.slash.minus',
+    color: '#8e8e93',
+    gradient: ['#1c1c1e', '#3a3a3c'],
+    category: 'utilities',
+    defaultPage: 2,
+    entitlements: [],
+    loader: () => import('./Calculator.jsx'),
+  },
+  {
+    bundleId: 'com.apple.clock',
+    name: 'Clock',
+    displayName: 'Reloj',
+    version: '1.0.0',
+    icon: 'clock.fill',
+    color: '#000000',
+    category: 'utilities',
+    defaultPage: 0,
+    entitlements: ['alarms', 'notifications'],
+    loader: () => import('./Clock.jsx'),
+  },
+  {
+    bundleId: 'com.apple.weather',
+    name: 'Weather',
+    displayName: 'Tiempo',
+    version: '1.0.0',
+    icon: 'cloud.sun.fill',
+    color: '#0a84ff',
+    gradient: ['#4A90E2', '#87CEEB'],
+    category: 'utilities',
+    defaultPage: 0,
+    entitlements: ['location', 'network'],
+    loader: () => import('./Weather.jsx'),
+  },
+  {
+    bundleId: 'com.apple.compass',
+    name: 'Compass',
+    displayName: 'Brújula',
+    version: '1.0.0',
+    icon: 'location.north.circle.fill',
+    color: '#ff453a',
+    category: 'utilities',
+    defaultPage: 2,
+    entitlements: ['location', 'magnetometer'],
+    loader: () => import('./Compass.jsx'),
+  },
+  {
+    bundleId: 'com.apple.measure',
+    name: 'Measure',
+    displayName: 'Medir',
+    version: '1.0.0',
+    icon: 'ruler',
+    color: '#8e8e93',
+    category: 'utilities',
+    defaultPage: 3,
+    entitlements: ['camera', 'arkit'],
+    loader: () => import('./Measure.jsx'),
+  },
+  {
+    bundleId: 'com.apple.voice.memos',
+    name: 'VoiceMemos',
+    displayName: 'Notas de voz',
+    version: '1.0.0',
+    icon: 'waveform',
+    color: '#ff453a',
+    category: 'utilities',
+    defaultPage: 2,
+    entitlements: ['microphone', 'documents'],
+    loader: () => import('./VoiceMemos.jsx'),
+  },
+  {
+    bundleId: 'com.apple.translate',
+    name: 'Translate',
+    displayName: 'Traducir',
+    version: '1.0.0',
+    icon: 'character.book.closed.fill',
+    color: '#0a84ff',
+    category: 'utilities',
+    defaultPage: 3,
+    entitlements: ['network'],
+    loader: () => import('./Translate.jsx'),
+  },
+  {
+    bundleId: 'com.apple.files',
+    name: 'Files',
+    displayName: 'Archivos',
+    version: '1.0.0',
+    icon: 'folder.fill',
+    color: '#0a84ff',
+    gradient: ['#0a84ff', '#64d2ff'],
+    category: 'utilities',
+    defaultPage: 3,
+    entitlements: ['documents', 'icloud', 'downloads'],
+    loader: () => import('./Files.jsx'),
+  },
+  {
+    bundleId: 'com.apple.Installer',
+    name: 'Installer',
+    displayName: 'Instalador',
+    version: '1.0.0',
+    icon: 'shippingbox.fill',
+    color: '#0a84ff',
+    gradient: ['#0a84ff', '#5e5ce6'],
+    category: 'utilities',
+    defaultPage: 3,
+    entitlements: ['documents', 'downloads', 'network'],
+    loader: () => import('./Installer.jsx'),
+  },
+
+  /* ============================ AJUSTES Y TIENDA ============================ */
+  {
+    bundleId: 'com.apple.Preferences',
+    name: 'Settings',
+    displayName: 'Ajustes',
+    version: '1.0.0',
+    icon: 'gearshape.fill',
+    color: '#8e8e93',
+    gradient: ['#8e8e93', '#636366'],
     category: 'system',
-    developer: 'iOS Remastered',
-    statusBarTheme: 'light',
-  }),
+    defaultPage: 0,
+    defaultSlot: 4,
+    dock: true,
+    entitlements: ['system.settings', 'keychain.read'],
+    loader: () => import('./Settings.jsx'),
+  },
+  {
+    bundleId: 'com.apple.AppStore',
+    name: 'AppStore',
+    displayName: 'App Store',
+    version: '1.0.0',
+    icon: 'app.badge.fill',
+    color: '#0a84ff',
+    gradient: ['#0a84ff', '#5e5ce6'],
+    category: 'system',
+    defaultPage: 2,
+    entitlements: ['network', 'install'],
+    loader: () => import('./AppStore.jsx'),
+  },
+
+  /* ============================ SALUD Y FITNESS ============================ */
+  {
+    bundleId: 'com.apple.Health',
+    name: 'Health',
+    displayName: 'Salud',
+    version: '1.0.0',
+    icon: 'heart.fill',
+    color: '#ff375f',
+    category: 'health',
+    defaultPage: 1,
+    entitlements: ['health.read', 'health.write'],
+    loader: () => import('./Health.jsx'),
+  },
+  {
+    bundleId: 'com.apple.Fitness',
+    name: 'Fitness',
+    displayName: 'Fitness',
+    version: '1.0.0',
+    icon: 'figure.run',
+    color: '#30d158',
+    category: 'health',
+    defaultPage: 2,
+    entitlements: ['health.read', 'motion'],
+    loader: () => import('./Fitness.jsx'),
+  },
+
+  /* ============================ FINANZAS ============================ */
+  {
+    bundleId: 'com.apple.Wallet',
+    name: 'Wallet',
+    displayName: 'Wallet',
+    version: '1.0.0',
+    icon: 'creditcard.fill',
+    color: '#000000',
+    category: 'finance',
+    defaultPage: 1,
+    entitlements: ['nfc', 'secure.enclave'],
+    loader: () => import('./Wallet.jsx'),
+  },
+  {
+    bundleId: 'com.apple.stocks',
+    name: 'Stocks',
+    displayName: 'Bolsa',
+    version: '1.0.0',
+    icon: 'chart.line.uptrend.xyaxis',
+    color: '#000000',
+    category: 'finance',
+    defaultPage: 2,
+    entitlements: ['network'],
+    loader: () => import('./Stocks.jsx'),
+  },
+
+  /* ============================ ENTRETENIMIENTO ============================ */
+  {
+    bundleId: 'com.apple.news',
+    name: 'News',
+    displayName: 'Noticias',
+    version: '1.0.0',
+    icon: 'newspaper.fill',
+    color: '#ff453a',
+    category: 'entertainment',
+    defaultPage: 3,
+    entitlements: ['network'],
+    loader: () => import('./News.jsx'),
+  },
+  {
+    bundleId: 'com.apple.Books',
+    name: 'Books',
+    displayName: 'Libros',
+    version: '1.0.0',
+    icon: 'book.fill',
+    color: '#ff9f0a',
+    category: 'entertainment',
+    defaultPage: 3,
+    entitlements: ['documents', 'library'],
+    loader: () => import('./Books.jsx'),
+  },
+  {
+    bundleId: 'com.apple.gamecenter',
+    name: 'GameCenter',
+    displayName: 'Game Center',
+    version: '1.0.0',
+    icon: 'gamecontroller.fill',
+    color: '#0a84ff',
+    category: 'entertainment',
+    hidden: true,
+    loader: () => import('./GameCenter.jsx'),
+  },
+
+  /* ============================ CASA E IOT ============================ */
+  {
+    bundleId: 'com.apple.Home',
+    name: 'Home',
+    displayName: 'Casa',
+    version: '1.0.0',
+    icon: 'house.fill',
+    color: '#ff9f0a',
+    category: 'home',
+    defaultPage: 3,
+    entitlements: ['homekit', 'network'],
+    loader: () => import('./Home.jsx'),
+  },
+
+  /* ============================ OTROS ============================ */
+  {
+    bundleId: 'com.apple.tips',
+    name: 'Tips',
+    displayName: 'Consejos',
+    version: '1.0.0',
+    icon: 'lightbulb.fill',
+    color: '#ffd60a',
+    category: 'system',
+    hidden: true,
+    loader: () => import('./Tips.jsx'),
+  },
+  {
+    bundleId: 'com.apple.shortcuts',
+    name: 'Shortcuts',
+    displayName: 'Atajos',
+    version: '1.0.0',
+    icon: 'square.stack.3d.up.fill',
+    color: '#bf5af2',
+    gradient: ['#bf5af2', '#ff375f'],
+    category: 'system',
+    defaultPage: 2,
+    entitlements: ['automation'],
+    loader: () => import('./Shortcuts.jsx'),
+  },
+  {
+    bundleId: 'com.apple.contacts',
+    name: 'ContactsDuplicate',
+    displayName: 'Contactos (alt)',
+    version: '1.0.0',
+    icon: 'person.2.fill',
+    color: '#8e8e93',
+    category: 'system',
+    hidden: true,
+    loader: null,
+  },
 ];
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Layout por defecto del Springboard
-// ─────────────────────────────────────────────────────────────────────────────
+/* ============================================================================
+ * ENTITLEMENTS — definición legible
+ * ========================================================================== */
 
-/**
- * Define en qué página y en qué orden van las apps del sistema.
- * Las apps instaladas (IPA) se añaden después en el primer hueco libre.
- */
+export const ENTITLEMENTS = {
+  network:           { label: 'Acceso a red',              icon: 'wifi',                 color: '#0a84ff' },
+  camera:            { label: 'Cámara',                    icon: 'camera.fill',          color: '#8e8e93' },
+  microphone:        { label: 'Micrófono',                 icon: 'mic.fill',             color: '#ff453a' },
+  location:          { label: 'Ubicación',                 icon: 'location.fill',        color: '#0a84ff' },
+  photos_read:       { label: 'Leer fotos',                icon: 'photo',                color: '#30d158' },
+  photos_write:      { label: 'Escribir fotos',            icon: 'photo.badge.plus',     color: '#30d158' },
+  contacts_read:     { label: 'Leer contactos',            icon: 'person.crop.circle',   color: '#8e8e93' },
+  contacts_write:    { label: 'Escribir contactos',        icon: 'person.crop.circle.badge.plus', color: '#8e8e93' },
+  calendar_read:     { label: 'Leer calendario',           icon: 'calendar',             color: '#ff453a' },
+  calendar_write:    { label: 'Escribir calendario',       icon: 'calendar.badge.plus',  color: '#ff453a' },
+  reminders_read:    { label: 'Leer recordatorios',        icon: 'checklist',            color: '#0a84ff' },
+  reminders_write:   { label: 'Escribir recordatorios',    icon: 'checklist.checked',    color: '#0a84ff' },
+  health_read:       { label: 'Leer datos de salud',       icon: 'heart',                color: '#ff375f' },
+  health_write:      { label: 'Escribir datos de salud',   icon: 'heart.text.square',    color: '#ff375f' },
+  mail_read:         { label: 'Leer correo',               icon: 'envelope.open',        color: '#0a84ff' },
+  mail_send:         { label: 'Enviar correo',             icon: 'paperplane.fill',      color: '#0a84ff' },
+  messages_read:     { label: 'Leer mensajes',             icon: 'message',              color: '#30d158' },
+  messages_send:     { label: 'Enviar mensajes',           icon: 'message.fill',         color: '#30d158' },
+  telephony:         { label: 'Telefonía',                 icon: 'phone.fill',           color: '#30d158' },
+  audio:             { label: 'Audio',                     icon: 'speaker.wave.2.fill',  color: '#ff375f' },
+  video:             { label: 'Vídeo',                     icon: 'video.fill',           color: '#bf5af2' },
+  documents:         { label: 'Documentos',                icon: 'doc.fill',             color: '#8e8e93' },
+  downloads:         { label: 'Descargas',                 icon: 'arrow.down.circle',    color: '#0a84ff' },
+  icloud:            { label: 'iCloud',                    icon: 'cloud.fill',           color: '#0a84ff' },
+  install:           { label: 'Instalar apps',             icon: 'square.and.arrow.down', color: '#0a84ff' },
+  system_settings:   { label: 'Ajustes del sistema',       icon: 'gearshape.fill',       color: '#8e8e93' },
+  keychain_read:     { label: 'Llavero',                   icon: 'key.fill',             color: '#ffd60a' },
+  notifications:     { label: 'Notificaciones',            icon: 'bell.fill',            color: '#ff453a' },
+  motion:            { label: 'Movimiento',                icon: 'figure.walk',          color: '#30d158' },
+  magnetometer:      { label: 'Magnetómetro',              icon: 'location.north',       color: '#ff453a' },
+  arkit:             { label: 'AR',                        icon: 'arkit',                color: '#bf5af2' },
+  nfc:               { label: 'NFC',                       icon: 'wave.3.right',         color: '#0a84ff' },
+  secure_enclave:    { label: 'Secure Enclave',            icon: 'lock.shield.fill',     color: '#30d158' },
+  homekit:           { label: 'Casa',                      icon: 'house.fill',           color: '#ff9f0a' },
+  automation:        { label: 'Automatización',            icon: 'wand.and.stars',       color: '#bf5af2' },
+  library:           { label: 'Biblioteca',                icon: 'books.vertical.fill',  color: '#ff9f0a' },
+  library_read:      { label: 'Leer biblioteca',           icon: 'books.vertical',       color: '#ff9f0a' },
+  history:           { label: 'Historial',                 icon: 'clock.arrow.circlepath', color: '#8e8e93' },
+};
+
+/* ============================================================================
+ * DISTRIBUCIÓN POR DEFECTO EN EL SPRINGBOARD
+ * ========================================================================== */
+
 export const DEFAULT_PAGES = [
-  {
-    id: 'page-0',
-    apps: [
-      'com.apple.mobilesafari',
-      'com.apple.mobilephone',
-      'com.apple.MobileSMS',
-      'com.apple.mobilemail',
-      'com.apple.mobileslideshow',
-      'com.apple.Music',
-      'com.apple.mobiletimer',
-      'com.apple.weather',
-      'com.apple.mobilenotes',
-      'com.apple.calculator',
-      'com.apple.files',
-      'com.iosremastered.installer',
-    ],
-  },
-  {
-    id: 'page-1',
-    apps: [
-      'com.apple.Preferences',
-      'com.apple.Terminal',
-      'com.iosremastered.machoviewer',
-      'com.iosremastered.hardware',
-    ],
-  },
+  // Página 0
+  [
+    'com.apple.mobilephone',
+    'com.apple.MobileSMS',
+    'com.apple.mobilesafari',
+    'com.apple.mobileslideshow',
+    'com.apple.camera',
+    'com.apple.clock',
+    'com.apple.weather',
+    'com.apple.calculator',
+    'com.apple.mobilemail',
+    'com.apple.FaceTime',
+    'com.apple.Music',
+    'com.apple.podcasts',
+    'com.apple.Health',
+    'com.apple.Fitness',
+    'com.apple.Wallet',
+    'com.apple.stocks',
+    'com.apple.mobilenotes',
+    'com.apple.reminders',
+    'com.apple.calendar',
+    'com.apple.Contacts',
+    'com.apple.translate',
+    'com.apple.shortcuts',
+    'com.apple.compass',
+    'com.apple.Preferences',
+  ],
+  // Página 1
+  [
+    'com.apple.tv',
+    'com.apple.news',
+    'com.apple.Books',
+    'com.apple.Home',
+    'com.apple.iWork.Pages',
+    'com.apple.iWork.Numbers',
+    'com.apple.iWork.Keynote',
+    'com.apple.freeform',
+    'com.apple.measure',
+    'com.apple.voice.memos',
+    'com.apple.AppStore',
+    'com.apple.files',
+    'com.apple.Installer',
+  ],
+  // Página 2
+  [
+    'com.apple.tips',
+    'com.apple.gamecenter',
+    'com.apple.contacts',
+  ],
 ];
 
-/** Apps que van en el Dock por defecto. */
 export const DEFAULT_DOCK = [
   'com.apple.mobilephone',
-  'com.apple.mobilesafari',
   'com.apple.MobileSMS',
-  'com.apple.Music',
+  'com.apple.mobilesafari',
+  'com.apple.mobileslideshow',
+  'com.apple.Preferences',
 ];
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Store del registro (singleton)
-// ─────────────────────────────────────────────────────────────────────────────
+/* ============================================================================
+ * STORE REACTIVO
+ * ========================================================================== */
 
 const listeners = new Set();
 
-const store = {
-  systemApps: [...SYSTEM_APPS],
-  userApps: [],
-  pageOverrides: null, // si el usuario reordena
-  dockOverrides: null,
-  hiddenIds: new Set(),
+const state = {
+  apps: new Map(),
+  pages: [...DEFAULT_PAGES.map((p) => [...p])],
+  dock: [...DEFAULT_DOCK],
+  favorites: ['com.apple.mobilesafari', 'com.apple.mobileslideshow', 'com.apple.music'],
+  folders: [],
+  badges: new Map(),
+  installedAt: new Map(),
+  hidden: new Set(),
+  version: 0,
 };
 
+// Inicializar apps del sistema
+for (const app of SYSTEM_APPS) {
+  state.apps.set(app.bundleId, {
+    ...app,
+    system: true,
+    installed: true,
+    installedAt: Date.now(),
+  });
+  state.installedAt.set(app.bundleId, Date.now());
+}
+
 function emit() {
-  for (const fn of listeners) fn();
+  state.version++;
+  for (const fn of listeners) {
+    try { fn(); } catch (e) { console.error(e); }
+  }
 }
 
 function subscribe(fn) {
   listeners.add(fn);
-  fn();
   return () => listeners.delete(fn);
 }
 
-/** Todas las apps (sistema + usuario) sin ocultas. */
-function getAllApps() {
-  const all = [...store.systemApps, ...store.userApps];
-  return all.filter((a) => !store.hiddenIds.has(a.id));
-}
-
-/** Busca una app por id. */
-function getApp(id) {
-  if (!id) return null;
-  return (
-    store.systemApps.find((a) => a.id === id) ||
-    store.userApps.find((a) => a.id === id) ||
-    null
-  );
-}
-
-/** Registra una app instalada (IPA). */
-function registerUserApp(app) {
-  const normalized = defineApp({ ...app, system: false });
-  // Evitar duplicados: si ya existe el mismo bundleId, reemplazar
-  const idx = store.userApps.findIndex((a) => a.id === normalized.id);
-  if (idx >= 0) {
-    store.userApps = [
-      ...store.userApps.slice(0, idx),
-      normalized,
-      ...store.userApps.slice(idx + 1),
-    ];
-  } else {
-    store.userApps = [...store.userApps, normalized];
-  }
-  emit();
-  return normalized;
-}
-
-/** Desinstala una app. */
-function unregisterUserApp(id) {
-  store.userApps = store.userApps.filter((a) => a.id !== id);
-  emit();
-}
-
-/** Oculta/muestra una app sin desinstalarla. */
-function setHidden(id, hidden) {
-  if (hidden) store.hiddenIds.add(id);
-  else store.hiddenIds.delete(id);
-  emit();
-}
-
-/** Define el orden de páginas manualmente. */
-function setPages(pages) {
-  store.pageOverrides = pages;
-  emit();
-}
-
-/** Define el Dock manualmente. */
-function setDock(dock) {
-  store.dockOverrides = dock;
-  emit();
-}
-
-/** Resetea el layout a los defaults. */
-function resetLayout() {
-  store.pageOverrides = null;
-  store.dockOverrides = null;
-  emit();
-}
-
-/**
- * Calcula las páginas efectivas: usa overrides si existen, si no, el default
- * más las apps de usuario colocadas en huecos libres.
- */
-function getPages() {
-  const allApps = getAllApps();
-  const byId = new Map(allApps.map((a) => [a.id, a]));
-
-  // Base: páginas default filtradas por apps existentes
-  const basePages = (store.pageOverrides || DEFAULT_PAGES).map((p) => ({
-    id: p.id,
-    apps: p.apps
-      .map((id) => byId.get(id))
-      .filter(Boolean)
-      .map((a) => a.id),
-  }));
-
-  // Si no hay overrides, añadir apps de usuario a las páginas default
-  if (!store.pageOverrides) {
-    const placed = new Set(basePages.flatMap((p) => p.apps));
-    const pending = allApps
-      .filter((a) => !placed.has(a.id) && !a.dock)
-      .map((a) => a.id);
-
-    const APPS_PER_PAGE = 24;
-    let lastPage = basePages[basePages.length - 1];
-    if (!lastPage) {
-      lastPage = { id: 'page-0', apps: [] };
-      basePages.push(lastPage);
-    }
-    for (const id of pending) {
-      if (lastPage.apps.length >= APPS_PER_PAGE) {
-        lastPage = { id: `page-${basePages.length}`, apps: [] };
-        basePages.push(lastPage);
-      }
-      lastPage.apps.push(id);
-    }
-  }
-
-  return basePages;
-}
-
-/** Dock efectivo (ids). */
-function getDock() {
-  if (store.dockOverrides) return store.dockOverrides;
-  const allApps = getAllApps();
-  const byId = new Map(allApps.map((a) => [a.id, a]));
-  return DEFAULT_DOCK.filter((id) => byId.has(id));
-}
-
-/** Categorías para la App Library. */
-function getCategories() {
-  const allApps = getAllApps();
-  const cats = new Map();
-  for (const a of allApps) {
-    const c = a.category || 'utilities';
-    if (!cats.has(c)) cats.set(c, []);
-    cats.get(c).push(a);
-  }
-  return Array.from(cats.entries()).map(([id, apps]) => ({
-    id,
-    name: categoryLabel(id),
-    apps,
-  }));
-}
-
-function categoryLabel(id) {
-  const labels = {
-    communication: 'Comunicación',
-    media: 'Multimedia',
-    productivity: 'Productividad',
-    utilities: 'Utilidades',
-    internet: 'Internet',
-    system: 'Sistema',
-    developer: 'Desarrollo',
-    games: 'Juegos',
-    other: 'Otras',
-  };
-  return labels[id] || 'Otras';
-}
-
-/** Snapshot del registro para depuración / apps. */
 function snapshot() {
   return {
-    systemCount: store.systemApps.length,
-    userCount: store.userApps.length,
-    pages: getPages(),
-    dock: getDock(),
-    categories: getCategories(),
-    total: getAllApps().length,
+    version: state.version,
+    apps: new Map(state.apps),
+    pages: state.pages.map((p) => [...p]),
+    dock: [...state.dock],
+    favorites: [...state.favorites],
+    badges: new Map(state.badges),
+    hidden: new Set(state.hidden),
+    folders: state.folders.map((f) => ({ ...f, apps: [...f.apps] })),
   };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// API pública del registro (singleton)
-// ─────────────────────────────────────────────────────────────────────────────
+/* ============================================================================
+ * API PÚBLICA
+ * ========================================================================== */
 
-const registry = {
-  // Datos
-  SYSTEM_APPS,
-  DEFAULT_PAGES,
-  DEFAULT_DOCK,
-  ENTITLEMENTS,
-
-  // Lectura
-  all: getAllApps,
-  get: getApp,
-  getPages,
-  getDock,
-  getCategories,
+export const registry = {
+  subscribe,
   snapshot,
 
-  // Escritura
-  register: registerUserApp,
-  unregister: unregisterUserApp,
-  setHidden,
-  setPages,
-  setDock,
-  resetLayout,
+  /* --------------------------- Consultas -------------------------- */
 
-  // Suscripción
-  subscribe,
+  all() {
+    return [...state.apps.values()].filter((a) => !a.hidden);
+  },
+
+  allIncludingHidden() {
+    return [...state.apps.values()];
+  },
+
+  get(bundleId) {
+    return state.apps.get(bundleId) || null;
+  },
+
+  exists(bundleId) {
+    return state.apps.has(bundleId);
+  },
+
+  getPages() {
+    return state.pages.map((page) =>
+      page.map((id) => state.apps.get(id)).filter(Boolean)
+    );
+  },
+
+  getPagesRaw() {
+    return state.pages.map((p) => [...p]);
+  },
+
+  getDock() {
+    return state.dock.map((id) => state.apps.get(id)).filter(Boolean);
+  },
+
+  getDockRaw() {
+    return [...state.dock];
+  },
+
+  getCategories() {
+    const map = new Map();
+    for (const app of state.apps.values()) {
+      if (app.hidden) continue;
+      const cat = app.category || 'other';
+      if (!map.has(cat)) map.set(cat, []);
+      map.get(cat).push(app);
+    }
+    return Object.fromEntries(map);
+  },
+
+  getByCategory(category) {
+    return [...state.apps.values()].filter((a) => a.category === category && !a.hidden);
+  },
+
+  getInstalled() {
+    return [...state.apps.values()].filter((a) => a.installed);
+  },
+
+  getUserInstalled() {
+    return [...state.apps.values()].filter((a) => a.installed && !a.system);
+  },
+
+  getBadgeCount(bundleId) {
+    return state.badges.get(bundleId) || 0;
+  },
+
+  getAllBadges() {
+    return Object.fromEntries(state.badges);
+  },
+
+  isHidden(bundleId) {
+    return state.hidden.has(bundleId);
+  },
+
+  isFavorite(bundleId) {
+    return state.favorites.includes(bundleId);
+  },
+
+  getFolders() {
+    return state.folders.map((f) => ({ ...f, apps: [...f.apps] }));
+  },
+
+  /* --------------------------- Registro -------------------------- */
+
+  register(app) {
+    if (!app || !app.bundleId) {
+      console.warn('[registry] app sin bundleId');
+      return false;
+    }
+    if (state.apps.has(app.bundleId)) {
+      // Si ya existe pero no está instalada, la instalamos
+      const existing = state.apps.get(app.bundleId);
+      if (!existing.installed) {
+        state.apps.set(app.bundleId, { ...existing, ...app, installed: true, installedAt: Date.now() });
+        state.installedAt.set(app.bundleId, Date.now());
+        addToFirstFreeSlot(app.bundleId);
+        emit();
+        return true;
+      }
+      return false;
+    }
+    state.apps.set(app.bundleId, {
+      ...app,
+      installed: true,
+      system: app.system || false,
+      installedAt: Date.now(),
+    });
+    state.installedAt.set(app.bundleId, Date.now());
+    addToFirstFreeSlot(app.bundleId);
+    emit();
+    return true;
+  },
+
+  unregister(bundleId) {
+    const app = state.apps.get(bundleId);
+    if (!app) return false;
+    if (app.system && !app.noUninstall) {
+      // Apps de sistema: no se pueden desinstalar realmente, solo ocultar
+      state.hidden.add(bundleId);
+      emit();
+      return true;
+    }
+    if (app.noUninstall) {
+      console.warn(`[registry] ${bundleId} no se puede desinstalar`);
+      return false;
+    }
+    state.apps.delete(bundleId);
+    state.installedAt.delete(bundleId);
+    state.badges.delete(bundleId);
+    for (const page of state.pages) {
+      const idx = page.indexOf(bundleId);
+      if (idx !== -1) page.splice(idx, 1);
+    }
+    const dockIdx = state.dock.indexOf(bundleId);
+    if (dockIdx !== -1) state.dock.splice(dockIdx, 1);
+    emit();
+    return true;
+  },
+
+  /* --------------------------- Layout -------------------------- */
+
+  setPages(pages) {
+    if (!Array.isArray(pages)) return;
+    state.pages = pages.map((p) => p.filter((id) => state.apps.has(id)));
+    emit();
+  },
+
+  setDock(dock) {
+    if (!Array.isArray(dock)) return;
+    state.dock = dock.slice(0, 5).filter((id) => state.apps.has(id));
+    emit();
+  },
+
+  moveApp(bundleId, toPage, toSlot) {
+    // Quitar de todas las páginas
+    for (const page of state.pages) {
+      const idx = page.indexOf(bundleId);
+      if (idx !== -1) page.splice(idx, 1);
+    }
+    const dockIdx = state.dock.indexOf(bundleId);
+    if (dockIdx !== -1) state.dock.splice(dockIdx, 1);
+
+    // Insertar en destino
+    if (toPage === 'dock') {
+      if (state.dock.length >= 5) return;
+      state.dock.push(bundleId);
+    } else {
+      if (!state.pages[toPage]) state.pages[toPage] = [];
+      state.pages[toPage].splice(toSlot, 0, bundleId);
+    }
+    emit();
+  },
+
+  addToDock(bundleId) {
+    if (state.dock.includes(bundleId)) return false;
+    if (state.dock.length >= 5) return false;
+    // Quitar de páginas
+    for (const page of state.pages) {
+      const idx = page.indexOf(bundleId);
+      if (idx !== -1) page.splice(idx, 1);
+    }
+    state.dock.push(bundleId);
+    emit();
+    return true;
+  },
+
+  removeFromDock(bundleId) {
+    const idx = state.dock.indexOf(bundleId);
+    if (idx === -1) return false;
+    state.dock.splice(idx, 1);
+    // Devolver a la primera página
+    if (state.pages[0]) state.pages[0].push(bundleId);
+    emit();
+    return true;
+  },
+
+  setHidden(bundleId, hidden) {
+    if (hidden) state.hidden.add(bundleId);
+    else state.hidden.delete(bundleId);
+    emit();
+  },
+
+  setFavorite(bundleId, fav) {
+    const idx = state.favorites.indexOf(bundleId);
+    if (fav && idx === -1) state.favorites.push(bundleId);
+    if (!fav && idx !== -1) state.favorites.splice(idx, 1);
+    emit();
+  },
+
+  /* --------------------------- Badges -------------------------- */
+
+  setBadge(bundleId, count) {
+    if (count > 0) state.badges.set(bundleId, count);
+    else state.badges.delete(bundleId);
+    emit();
+  },
+
+  incrementBadge(bundleId, by = 1) {
+    const cur = state.badges.get(bundleId) || 0;
+    state.badges.set(bundleId, cur + by);
+    emit();
+  },
+
+  clearBadge(bundleId) {
+    state.badges.delete(bundleId);
+    emit();
+  },
+
+  clearAllBadges() {
+    state.badges.clear();
+    emit();
+  },
+
+  /* --------------------------- Carpetas -------------------------- */
+
+  createFolder(name, bundleIds = []) {
+    const id = `folder_${Date.now().toString(36)}`;
+    const folder = { id, name, apps: bundleIds.slice(0, 9) };
+    state.folders.push(folder);
+    // Quitar apps de páginas
+    for (const bid of folder.apps) {
+      for (const page of state.pages) {
+        const idx = page.indexOf(bid);
+        if (idx !== -1) page.splice(idx, 1);
+      }
+    }
+    emit();
+    return folder;
+  },
+
+  addToFolder(folderId, bundleId) {
+    const folder = state.folders.find((f) => f.id === folderId);
+    if (!folder) return false;
+    if (folder.apps.length >= 9) return false;
+    if (folder.apps.includes(bundleId)) return false;
+    folder.apps.push(bundleId);
+    emit();
+    return true;
+  },
+
+  removeFromFolder(folderId, bundleId) {
+    const folder = state.folders.find((f) => f.id === folderId);
+    if (!folder) return false;
+    const idx = folder.apps.indexOf(bundleId);
+    if (idx === -1) return false;
+    folder.apps.splice(idx, 1);
+    emit();
+    return true;
+  },
+
+  renameFolder(folderId, name) {
+    const folder = state.folders.find((f) => f.id === folderId);
+    if (!folder) return false;
+    folder.name = name;
+    emit();
+    return true;
+  },
+
+  deleteFolder(folderId) {
+    const idx = state.folders.findIndex((f) => f.id === folderId);
+    if (idx === -1) return false;
+    const folder = state.folders[idx];
+    // Devolver apps a la primera página
+    for (const bid of folder.apps) {
+      if (state.pages[0]) state.pages[0].push(bid);
+    }
+    state.folders.splice(idx, 1);
+    emit();
+    return true;
+  },
+
+  /* --------------------------- Reset -------------------------- */
+
+  resetLayout() {
+    state.pages = DEFAULT_PAGES.map((p) => [...p]);
+    state.dock = [...DEFAULT_DOCK];
+    state.favorites = ['com.apple.mobilesafari', 'com.apple.mobileslideshow', 'com.apple.music'];
+    state.folders = [];
+    emit();
+  },
+
+  reset() {
+    state.apps.clear();
+    state.pages = DEFAULT_PAGES.map((p) => [...p]);
+    state.dock = [...DEFAULT_DOCK];
+    state.badges.clear();
+    state.hidden.clear();
+    state.folders = [];
+    for (const app of SYSTEM_APPS) {
+      state.apps.set(app.bundleId, {
+        ...app, system: true, installed: true, installedAt: Date.now(),
+      });
+    }
+    emit();
+  },
 };
+
+function addToFirstFreeSlot(bundleId) {
+  const target = 24;
+  for (const page of state.pages) {
+    if (page.length < target) {
+      page.push(bundleId);
+      return;
+    }
+  }
+  state.pages.push([bundleId]);
+}
+
+/* ============================================================================
+ * HOOKS DE REACT
+ * ========================================================================== */
+
+export function useRegistry() {
+  const [version, setVersion] = useState(registry.snapshot().version);
+  useEffect(() => subscribe(() => setVersion(registry.snapshot().version)), []);
+  return version;
+}
+
+export function useRegistrySync() {
+  const [snap, setSnap] = useState(registry.snapshot());
+  useEffect(() => subscribe(() => setSnap(registry.snapshot())), []);
+  return snap;
+}
+
+export function useApp(bundleId) {
+  useRegistry();
+  return registry.get(bundleId);
+}
+
+export function usePages() {
+  useRegistry();
+  return useMemo(() => registry.getPages(), [registry.snapshot().version]);
+}
+
+export function usePagesRaw() {
+  useRegistry();
+  return useMemo(() => registry.getPagesRaw(), [registry.snapshot().version]);
+}
+
+export function useDock() {
+  useRegistry();
+  return useMemo(() => registry.getDock(), [registry.snapshot().version]);
+}
+
+export function useDockRaw() {
+  useRegistry();
+  return useMemo(() => registry.getDockRaw(), [registry.snapshot().version]);
+}
+
+export function useCategories() {
+  useRegistry();
+  return useMemo(() => registry.getCategories(), [registry.snapshot().version]);
+}
+
+export function useBadge(bundleId) {
+  useRegistry();
+  return registry.getBadgeCount(bundleId);
+}
+
+export function useInstalled() {
+  useRegistry();
+  return useMemo(() => registry.getInstalled(), [registry.snapshot().version]);
+}
+
+export function useUserInstalled() {
+  useRegistry();
+  return useMemo(() => registry.getUserInstalled(), [registry.snapshot().version]);
+}
+
+/* ============================================================================
+ * HELPERS
+ * ========================================================================== */
+
+export function withBadges(apps) {
+  return apps.map((app) => ({
+    ...app,
+    badge: registry.getBadgeCount(app.bundleId),
+  }));
+}
+
+export function resolveApps(bundleIds) {
+  return bundleIds.map((id) => registry.get(id)).filter(Boolean);
+}
+
+export function getBadgeCount(bundleId) {
+  return registry.getBadgeCount(bundleId);
+}
+
+export function resolveEntitlement(id) {
+  const key = id.replace(/[.\-]/g, '_');
+  return ENTITLEMENTS[id] || ENTITLEMENTS[key] || {
+    label: id,
+    icon: 'lock.shield',
+    color: '#8e8e93',
+  };
+}
+
+export function formatEntitlements(list) {
+  return (list || []).map(resolveEntitlement);
+}
+
+/* ============================================================================
+ * VALIDACIÓN DE BADGES EN APPS DE SISTEMA
+ * Algunas apps nacen con badges por defecto
+ * ========================================================================== */
+
+// Mail: 3 no leídos
+registry.setBadge('com.apple.mobilemail', 3);
+// Mensajes: 2 no leídos
+registry.setBadge('com.apple.MobileSMS', 2);
+// App Store: 5 actualizaciones disponibles
+registry.setBadge('com.apple.AppStore', 5);
+// Recordatorios: 4 pendientes
+registry.setBadge('com.apple.reminders', 4);
+
+/* ============================================================================
+ * EXPORTS ADICIONALES
+ * ========================================================================== */
 
 export default registry;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Hooks de React
-// ─────────────────────────────────────────────────────────────────────────────
+export const categoryLabels = {
+  system:         'Sistema',
+  social:         'Social',
+  productivity:   'Productividad',
+  media:          'Multimedia',
+  utilities:      'Utilidades',
+  health:         'Salud',
+  finance:        'Finanzas',
+  entertainment: 'Entretenimiento',
+  home:           'Casa',
+  other:          'Otras',
+};
 
-/**
- * useRegistry — devuelve la lista de apps (sistema + usuario) y se actualiza
- * automáticamente cuando el registro cambia (instalación, borrado, etc.).
- */
-export function useRegistry() {
-  const [apps, setApps] = useState(() => getAllApps());
-  useEffect(() => {
-    const unsub = subscribe(() => setApps(getAllApps()));
-    return () => unsub();
-  }, []);
-  return apps;
-}
+export const categoryIcons = {
+  system:         'gearshape.fill',
+  social:         'person.2.fill',
+  productivity:   'doc.text.fill',
+  media:          'play.rectangle.fill',
+  utilities:      'wrench.and.screwdriver.fill',
+  health:         'heart.fill',
+  finance:        'creditcard.fill',
+  entertainment:  'sparkles',
+  home:           'house.fill',
+  other:          'square.grid.2x2.fill',
+};
 
-/** Hook que sincroniza el registro con las apps instaladas del OSContext. */
-export function useRegistrySync() {
-  const os = useOS();
-  const installed = os?.snapshot?.apps;
-
-  useEffect(() => {
-    if (!Array.isArray(installed)) return;
-    // Buscar apps instaladas que no estén en el registro y registrarlas
-    for (const raw of installed) {
-      const id = raw.bundleId || raw.id;
-      if (!id) continue;
-      if (registry.get(id)) continue;
-      registry.register({
-        id,
-        name: raw.name || raw.displayName || 'App',
-        emoji: raw.emoji,
-        glyph: raw.glyph,
-        color: raw.color,
-        render: raw.render || null,
-        permissions: raw.entitlements || [],
-        category: raw.category || 'other',
-        system: false,
-        developer: raw.developer || 'Desconocido',
-        version: raw.version || '1.0.0',
-        statusBarTheme: raw.statusBarTheme || 'auto',
-      });
-    }
-  }, [installed]);
-}
-
-/** Hook que devuelve el layout de páginas del Springboard. */
-export function usePages() {
-  const [pages, setPages] = useState(() => getPages());
-  useEffect(() => {
-    const unsub = subscribe(() => setPages(getPages()));
-    return () => unsub();
-  }, []);
-  return pages;
-}
-
-/** Hook que devuelve el Dock. */
-export function useDock() {
-  const [dock, setDock] = useState(() => getDock());
-  useEffect(() => {
-    const unsub = subscribe(() => setDock(getDock()));
-    return () => unsub();
-  }, []);
-  return dock;
-}
-
-/** Hook que devuelve las categorías para la App Library. */
-export function useCategories() {
-  const [cats, setCats] = useState(() => getCategories());
-  useEffect(() => {
-    const unsub = subscribe(() => setCats(getCategories()));
-    return () => unsub();
-  }, []);
-  return cats;
-}
-
-/**
- * useApp(id) — devuelve una app concreta y se actualiza si cambia.
- */
-export function useApp(id) {
-  const [app, setApp] = useState(() => getApp(id));
-  useEffect(() => {
-    const unsub = subscribe(() => setApp(getApp(id)));
-    return () => unsub();
-  }, [id]);
-  return app;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Utilidades de presentación
-// ─────────────────────────────────────────────────────────────────────────────
-
-/** Devuelve una lista de apps a partir de una lista de ids. */
-export function resolveApps(ids) {
-  if (!Array.isArray(ids)) return [];
-  return ids.map((id) => getApp(id)).filter(Boolean);
-}
-
-/** Cuenta las notificaciones (badge) de una app leyendo del OSContext. */
-export function getBadgeCount(os, appId) {
-  const notifs = os?.snapshot?.notifications || [];
-  return notifs.filter((n) => n.bundleId === appId && !n.isRead).length;
-}
-
-/** Aplica los badges a las apps (devuelve nuevas instancias). */
-export function withBadges(apps, os) {
-  if (!Array.isArray(apps)) return [];
-  return apps.map((a) => {
-    const badge = getBadgeCount(os, a.id);
-    return badge > 0 ? { ...a, badge } : a;
-  });
-}
+/* ============================================================================
+ * TOTAL: ~900 líneas
+ *
+ * Catálogo completo:
+ * - 44 apps del sistema registradas
+ * - Categorías con labels e iconos
+ * - Entitlements definidos con nombre + icono + color
+ * - Layout por defecto: 3 páginas + Dock de 5
+ * - Store reactivo con subscribe/snapshot
+ *
+ * API pública:
+ * - Consultas: all, get, exists, getPages, getDock, getCategories,
+ *   getInstalled, getUserInstalled, getBadgeCount, isHidden, isFavorite,
+ *   getFolders
+ * - Registro: register, unregister
+ * - Layout: setPages, setDock, moveApp, addToDock, removeFromDock,
+ *   setHidden, setFavorite
+ * - Badges: setBadge, incrementBadge, clearBadge, clearAllBadges
+ * - Carpetas: createFolder, addToFolder, removeFromFolder, renameFolder,
+ *   deleteFolder
+ * - Reset: resetLayout, reset
+ *
+ * Hooks:
+ * - useRegistry, useRegistrySync, useApp, usePages, usePagesRaw,
+ *   useDock, useDockRaw, useCategories, useBadge, useInstalled,
+ *   useUserInstalled
+ *
+ * Helpers:
+ * - withBadges, resolveApps, getBadgeCount, resolveEntitlement,
+ *   formatEntitlements
+ * ========================================================================== */
