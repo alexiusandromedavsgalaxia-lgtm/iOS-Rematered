@@ -580,7 +580,7 @@ export {
   ThermalBar,
   ThermalChip,
   ThermalSensorRow,
-  THERMAL_LEVELS,
+  // THERMAL_LEVELS,  ← borra esta línea
 };
 
 export default VThermal;
