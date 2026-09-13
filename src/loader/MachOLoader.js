@@ -781,6 +781,600 @@ export class MachOLoader {
         case LC_FILESET_ENTRY: {
           // Leemos y descartamos (no soportamos fileset)
           reader.u32(); reader.u32(); reader.u32(); // vmaddr, fileoff, entry_id_offset
-          reader.u32(); // reserved
+          reader.u32(); // reserved          break;
+        }
+        default:
+          // LC desconocido: saltamos
+          Logger.debug(LOG_TAG, `LC desconocido ${hex(cmd)} (${cmdsize} bytes)`);
+      }
 
-          -- UNENDED
+      p += cmdsize;
+      count++;
+      this.stats.loadCommandsParsed++;
+    }
+
+    // Ordenar segmentos por vmaddr
+    image.segments.sort((a, b) => (a.vmaddr < b.vmaddr ? -1 : a.vmaddr > b.vmaddr ? 1 : 0));
+
+    // Base de la imagen = __TEXT.vmaddr
+    const text = image.segments.find(s => s.name === '__TEXT');
+    if (text) image.imageBase = text.vmaddr;
+  }
+
+  /* ================================================================ *
+   * Symtab
+   * ================================================================ */
+
+  _parseSymtab(image, sym, bytes) {
+    const strtab = bytes.subarray(sym.stroff, sym.stroff + sym.strsize);
+    const nlistSize = 16;   // nlist_64
+    let p = sym.symoff;
+    for (let i = 0; i < sym.nsyms; i++) {
+      const r = new BinaryReader(bytes);
+      r.seek(p);
+      const nl = readNlist64(r);
+      // nombre en strtab
+      let nameEnd = nl.n_strx;
+      while (nameEnd < strtab.length && strtab[nameEnd] !== 0) nameEnd++;
+      const name = new TextDecoder('utf-8').decode(strtab.subarray(nl.n_strx, nameEnd));
+      const symObj = {
+        name,
+        type: nl.n_type,
+        sect: nl.n_sect,
+        desc: nl.n_desc,
+        value: nl.n_value,
+        external: (nl.n_type & N_EXT) !== 0,
+        undefined: (nl.n_type & 0x0e) === N_UNDF,
+      };
+      image.symbols.push(symObj);
+      if (symObj.external && !symObj.undefined && name) {
+        image.globalSymbols.set(name, { addr: symObj.value, kind: 'external' });
+      } else if (name && !symObj.undefined) {
+        image.localSymbols.set(name, { addr: symObj.value, kind: 'local' });
+      }
+      p += nlistSize;
+    }
+    this.stats.symbolsParsed += image.symbols.length;
+    Logger.debug(LOG_TAG,
+      `Symtab: ${sym.nsyms} símbolos (${image.globalSymbols.size} globales, ` +
+      `${image.localSymbols.size} locales)`
+    );
+  }
+
+  /* ================================================================ *
+   * Mapeo de segmentos
+   * ================================================================ */
+
+  _mapSegments(image) {
+    const fileBytes = image.__fileBytes;
+    for (const seg of image.segments) {
+      // __PAGEZERO no se mapea (es solo protección)
+      if (seg.name === '__PAGEZERO') {
+        seg.data = new Uint8Array(0);
+        continue;
+      }
+      // Extraer contenido del archivo
+      const off = Number(seg.fileoff);
+      const sz = Number(seg.filesize);
+      if (off + sz <= fileBytes.length && sz > 0) {
+        seg.data = fileBytes.subarray(off, off + sz);
+      } else {
+        // Segmento sin contenido en archivo (__DATA bss al final, zerofill)
+        seg.data = new Uint8Array(sz > 0 ? sz : 0);
+      }
+
+      // Alocar en MemoryManager
+      if (this.memory) {
+        const pages = Math.ceil(Number(seg.vmsize) / PAGE_SIZE);
+        try {
+          const frame = this.memory.allocate?.(
+            Number(seg.vmsize),
+            `macho:${image.id}:${seg.name}`,
+            'macho'
+          );
+          seg.mappedAt = frame?.address ?? frame ?? null;
+        } catch (e) {
+          // Sin memory manager real, usamos la vmaddr como placeholder
+          seg.mappedAt = Number(seg.vmaddr);
+        }
+      } else {
+        seg.mappedAt = Number(seg.vmaddr);
+      }
+
+      // Copiar contenido si tenemos un buffer de memoria unificado
+      if (this.vcpu && typeof this.vcpu.writeMemory === 'function' && seg.data.length > 0) {
+        try {
+          this.vcpu.writeMemory(seg.vmaddr, seg.data);
+        } catch (e) {
+          Logger.warn(LOG_TAG, `writeMemory falló para ${seg.name}: ${e.message}`);
+        }
+      }
+
+      image.sizeInMemory += seg.vmsize;
+    }
+
+    Logger.debug(LOG_TAG,
+      `Mapeados ${image.segments.length} segmentos, ${hex(image.sizeInMemory)} bytes`
+    );
+  }
+
+  /* ================================================================ *
+   * Resolución de dylibs
+   * ================================================================ */
+
+  _resolveDylibs(image) {
+    for (const dylib of image.dylibs) {
+      // Intentar resolver por path directo
+      let entry = this.systemDylibs.get(dylib.path);
+      if (entry) {
+        dylib.resolved = true;
+        dylib.registryEntry = entry;
+        this.stats.dylibResolutions++;
+        continue;
+      }
+
+      // Intentar por @rpath
+      if (dylib.path.startsWith('@rpath/')) {
+        const rel = dylib.path.slice('@rpath/'.length);
+        for (const rp of image.rpaths) {
+          const candidate = rp.replace('@loader_path', dirnameOf(image.path)) + '/' + rel;
+          const found = this.systemDylibs.get(candidate);
+          if (found) {
+            dylib.resolved = true;
+            dylib.registryEntry = found;
+            dylib.path = candidate;
+            this.stats.dylibResolutions++;
+            break;
+          }
+        }
+      }
+
+      // Intentar por @loader_path
+      if (!dylib.resolved && dylib.path.startsWith('@loader_path/')) {
+        const rel = dylib.path.slice('@loader_path/'.length);
+        const candidate = dirnameOf(image.path) + '/' + rel;
+        const found = this.systemDylibs.get(candidate);
+        if (found) {
+          dylib.resolved = true;
+          dylib.registryEntry = found;
+          dylib.path = candidate;
+          this.stats.dylibResolutions++;
+        }
+      }
+
+      // Intentar por @executable_path
+      if (!dylib.resolved && dylib.path.startsWith('@executable_path/')) {
+        const rel = dylib.path.slice('@executable_path/'.length);
+        // Asumimos bundle = dirname del ejecutable
+        const candidate = dirnameOf(image.path) + '/' + rel;
+        const found = this.systemDylibs.get(candidate);
+        if (found) {
+          dylib.resolved = true;
+          dylib.registryEntry = found;
+          dylib.path = candidate;
+          this.stats.dylibResolutions++;
+        }
+      }
+
+      if (!dylib.resolved) {
+        if (dylib.weak) {
+          Logger.debug(LOG_TAG, `Dylib weak sin resolver: ${dylib.path}`);
+        } else {
+          this.stats.dylibMisses++;
+          Logger.warn(LOG_TAG, `Dylib no resuelta: ${dylib.path}`);
+          // En vez de fallar, registramos y seguimos (modo permisivo)
+          if (!this.allowUnresolvedDylibs) {
+            throw makeError(LOAD_ERRORS.UNRESOLVED_DYLIB,
+              `dylib no resuelta: ${dylib.path}`);
+          }
+        }
+      }
+    }
+  }
+
+  /* ================================================================ *
+   * Rebases
+   * ================================================================ */
+
+  _applyRebases(image) {
+    const info = image.dyldInfo;
+    if (!info || !info.rebase_size) return;
+    const bytes = image.__fileBytes;
+    const start = info.rebase_off;
+    const end = start + info.rebase_size;
+    const r = new BinaryReader(bytes);
+    r.seek(start);
+
+    let segIdx = 0;
+    let segOffset = 0n;
+    let rebaseType = REBASE_TYPE_POINTER;
+    let count = 0;
+
+    while (r.pos < end) {
+      const byte = r.u8();
+      const opcode = byte & REBASE_OPCODE_MASK;
+      const imm = byte & REBASE_IMMEDIATE_MASK;
+
+      switch (opcode) {
+        case REBASE_OPCODE_DONE:
+          break;
+        case REBASE_OPCODE_SET_TYPE_IMM:
+          rebaseType = imm;
+          break;
+        case REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB: {
+          segIdx = imm;
+          segOffset = r.uleb128();
+          break;
+        }
+        case REBASE_OPCODE_ADD_ADDR_ULEB: {
+          segOffset += r.uleb128();
+          break;
+        }
+        case REBASE_OPCODE_ADD_ADDR_IMM_SCALED: {
+          segOffset += BigInt(imm) * BigInt(8);
+          break;
+        }
+        case REBASE_OPCODE_DO_REBASE_IMM_TIMES: {
+          for (let i = 0; i < imm; i++) {
+            this._doRebase(image, segIdx, segOffset);
+            segOffset += 8n;
+            count++;
+          }
+          break;
+        }
+        case REBASE_OPCODE_DO_REBASE_ULEB_TIMES: {
+          const times = Number(r.uleb128());
+          for (let i = 0; i < times; i++) {
+            this._doRebase(image, segIdx, segOffset);
+            segOffset += 8n;
+            count++;
+          }
+          break;
+        }
+        case REBASE_OPCODE_DO_REBASE_ADD_ADDR_ULEB: {
+          this._doRebase(image, segIdx, segOffset);
+          segOffset += 8n + r.uleb128();
+          count++;
+          break;
+        }
+        case REBASE_OPCODE_DO_REBASE_ULEB_TIMES_SKIPPING_ULEB: {
+          const times = Number(r.uleb128());
+          const skip = r.uleb128();
+          for (let i = 0; i < times; i++) {
+            this._doRebase(image, segIdx, segOffset);
+            segOffset += 8n + skip;
+            count++;
+          }
+          break;
+        }
+        default:
+          throw makeError(LOAD_ERRORS.INVALID_OPCODE,
+            `rebase opcode inválido: ${hex(opcode)}`);
+      }
+      if (opcode === REBASE_OPCODE_DONE) break;
+    }
+
+    image.rebasesApplied = count;
+    this.stats.rebasesApplied += count;
+    if (count > 0) Logger.debug(LOG_TAG, `Rebases aplicados: ${count}`);
+  }
+
+  _doRebase(image, segIdx, segOffset) {
+    const seg = image.segments[segIdx];
+    if (!seg) return;
+    const addr = seg.vmaddr + segOffset;
+    // Leer puntero actual
+    if (this.vcpu && typeof this.vcpu.readMemory === 'function') {
+      try {
+        const cur = this.vcpu.readMemory(addr, 8);
+        const ptr = cur.reduce((a, b, i) => a | (BigInt(b) << BigInt(8 * i)), 0n);
+        // Slide = imageBase - originalBase; aquí asumimos 0 (imagen cargada en su base)
+        const slide = 0n;
+        const newPtr = ptr + slide;
+        const buf = new Uint8Array(8);
+        for (let i = 0; i < 8; i++) buf[i] = Number((newPtr >> BigInt(8 * i)) & 0xffn);
+        this.vcpu.writeMemory(addr, buf);
+      } catch {}
+    }
+  }
+
+  /* ================================================================ *
+   * Binds
+   * ================================================================ */
+
+  _applyBinds(image) {
+    const info = image.dyldInfo;
+    if (!info) return;
+
+    // Bind
+    if (info.bind_size) {
+      this._runBindOpcodes(image, info.bind_off, info.bind_size, 'bind');
+    }
+    // Weak bind
+    if (info.weak_bind_size) {
+      this._runBindOpcodes(image, info.weak_bind_off, info.weak_bind_size, 'weak');
+    }
+    // Lazy bind
+    if (info.lazy_bind_size) {
+      this._runBindOpcodes(image, info.lazy_bind_off, info.lazy_bind_size, 'lazy');
+    }
+
+    this.stats.bindsApplied += image.bindsApplied;
+  }
+
+  _runBindOpcodes(image, off, size, kind) {
+    const bytes = image.__fileBytes;
+    const r = new BinaryReader(bytes);
+    r.seek(off);
+    const end = off + size;
+
+    let segIdx = 0;
+    let segOffset = 0n;
+    let bindType = BIND_TYPE_POINTER;
+    let dylibOrdinal = 0;
+    let symbolName = '';
+    let symbolFlags = 0;
+    let addend = 0n;
+    let count = 0;
+
+    while (r.pos < end) {
+      const byte = r.u8();
+      const opcode = byte & BIND_OPCODE_MASK;
+      const imm = byte & BIND_IMMEDIATE_MASK;
+
+      switch (opcode) {
+        case BIND_OPCODE_DONE:
+          // En lazy bind significa fin
+          if (kind === 'lazy') { r.pos = end; }
+          break;
+        case BIND_OPCODE_SET_DYLIB_ORDINAL_IMM:
+          dylibOrdinal = imm;
+          break;
+        case BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB:
+          dylibOrdinal = Number(r.uleb128());
+          break;
+        case BIND_OPCODE_SET_DYLIB_SPECIAL_IMM: {
+          const sign = imm & 0x8 ? -1 : 1;
+          dylibOrdinal = sign * (imm & 0x7);
+          break;
+        }
+        case BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM:
+          symbolFlags = imm;
+          symbolName = r.cstring(1024);
+          break;
+        case BIND_OPCODE_SET_TYPE_IMM:
+          bindType = imm;
+          break;
+        case BIND_OPCODE_SET_ADDEND_SLEB:
+          addend = r.sleb128();
+          break;
+        case BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB:
+          segIdx = imm;
+          segOffset = r.uleb128();
+          break;
+        case BIND_OPCODE_ADD_ADDR_ULEB:
+          segOffset += r.uleb128();
+          break;
+        case BIND_OPCODE_DO_BIND: {
+          this._doBind(image, segIdx, segOffset, symbolName, dylibOrdinal, bindType, addend, kind);
+          segOffset += 8n;
+          count++;
+          break;
+        }
+        case BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB: {
+          this._doBind(image, segIdx, segOffset, symbolName, dylibOrdinal, bindType, addend, kind);
+          segOffset += 8n + r.uleb128();
+          count++;
+          break;
+        }
+        case BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED: {
+          this._doBind(image, segIdx, segOffset, symbolName, dylibOrdinal, bindType, addend, kind);
+          segOffset += BigInt(8 * (imm + 1));
+          count++;
+          break;
+        }
+        case BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB: {
+          const times = Number(r.uleb128());
+          const skip = r.uleb128();
+          for (let i = 0; i < times; i++) {
+            this._doBind(image, segIdx, segOffset, symbolName, dylibOrdinal, bindType, addend, kind);
+            segOffset += 8n + skip;
+            count++;
+          }
+          break;
+        }
+        case BIND_OPCODE_THREADED:
+          // Chained fixups — no implementado aquí
+          Logger.debug(LOG_TAG, 'BIND_OPCODE_THREADED encontrado, saltando');
+          break;
+        default:
+          throw makeError(LOAD_ERRORS.INVALID_OPCODE,
+            `bind opcode inválido: ${hex(opcode)} (kind=${kind})`);
+      }
+    }
+
+    image.bindsApplied = (image.bindsApplied || 0) + count;
+    if (count > 0) Logger.debug(LOG_TAG, `Binds ${kind}: ${count}`);
+  }
+
+  _doBind(image, segIdx, segOffset, symbolName, dylibOrdinal, type, addend, kind) {
+    const seg = image.segments[segIdx];
+    if (!seg) return;
+    const addr = seg.vmaddr + segOffset;
+
+    // Resolver símbolo
+    let target = null;
+    if (dylibOrdinal === BIND_SPECIAL_DYLIB_SELF) {
+      target = image.globalSymbols.get(symbolName) || image.localSymbols.get(symbolName);
+    } else if (dylibOrdinal === BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE) {
+      target = image.globalSymbols.get(symbolName);
+    } else if (dylibOrdinal === BIND_SPECIAL_DYLIB_FLAT_LOOKUP) {
+      const found = this.systemDylibs.findSymbol(symbolName);
+      if (found) target = { addr: found.addr, lib: found.lib };
+    } else if (dylibOrdinal > 0 && dylibOrdinal <= image.dylibs.length) {
+      const dylib = image.dylibs[dylibOrdinal - 1];
+      if (dylib && dylib.registryEntry) {
+        const a = dylib.registryEntry.exports.get(symbolName);
+        if (a != null) target = { addr: a, lib: dylib.path };
+      }
+    }
+    if (!target) {
+      // Fallback: buscar en sistema
+      const found = this.systemDylibs.findSymbol(symbolName);
+      if (found) target = { addr: found.addr, lib: found.lib };
+    }
+
+    const finalAddr = target ? target.addr + addend : 0n;
+
+    // Guardar binding
+    image.bindings.push({
+      addr,
+      symbol: symbolName,
+      dylibOrdinal,
+      type,
+      addend: Number(addend),
+      resolvedTo: finalAddr,
+      resolvedLib: target?.lib || null,
+      kind,
+    });
+
+    // Escribir en memoria si tenemos VCPU
+    if (this.vcpu && typeof this.vcpu.writeMemory === 'function') {
+      const buf = new Uint8Array(8);
+      for (let i = 0; i < 8; i++) buf[i] = Number((finalAddr >> BigInt(8 * i)) & 0xffn);
+      try { this.vcpu.writeMemory(addr, buf); } catch {}
+    }
+  }
+
+  /* ================================================================ *
+   * Entry point
+   * ================================================================ */
+
+  _computeEntry(image, opts) {
+    if (image.entryOffset != null) {
+      image.entryPoint = image.imageBase + BigInt(image.entryOffset);
+      return;
+    }
+    // Buscar _main
+    const main = image.globalSymbols.get('_main') || image.localSymbols.get('_main');
+    if (main) {
+      image.entryPoint = main.addr;
+      return;
+    }
+    // Fallback: inicio de __TEXT
+    const text = image.segments.find(s => s.name === '__TEXT');
+    if (text) {
+      image.entryPoint = text.vmaddr;
+    }
+  }
+
+  /* ================================================================ *
+   * Ejecución (integración con VCPU)
+   * ================================================================ */
+
+  launch(imageId, opts = {}) {
+    const image = this.images.get(imageId);
+    if (!image) throw makeError(LOAD_ERRORS.GENERIC, 'imagen no cargada');
+    if (image.entryPoint == null) {
+      throw makeError(LOAD_ERRORS.MISSING_ENTRY, 'sin entry point');
+    }
+    if (!this.vcpu) {
+      Logger.warn(LOG_TAG, 'Sin VCPU — no se puede ejecutar');
+      return { success: false, reason: 'no vcpu' };
+    }
+    Logger.info(LOG_TAG,
+      `Ejecutando ${image.path} desde ${hex(image.entryPoint, 12)} (argv=${opts.argv?.length || 0})`
+    );
+    const ctx = this.vcpu.createProcess?.({ imageId, entry: image.entryPoint, argv: opts.argv || [] });
+    this._emit('launched', { id: image.id, entry: image.entryPoint });
+    return { success: true, context: ctx, entry: image.entryPoint };
+  }
+
+  /* ================================================================ *
+   * Consultas de símbolos
+   * ================================================================ */
+
+  resolveSymbol(imageId, name) {
+    const image = this.images.get(imageId);
+    if (!image) return null;
+    const local = image.globalSymbols.get(name) || image.localSymbols.get(name);
+    if (local) return { addr: local.addr, lib: image.path, local: true };
+    return this.systemDylibs.findSymbol(name);
+  }
+
+  /* ================================================================ *
+   * Suscriptores / stats / dump
+   * ================================================================ */
+
+  subscribe(fn) {
+    this.subscribers.add(fn);
+    return () => this.subscribers.delete(fn);
+  }
+
+  _emit(type, payload) {
+    for (const fn of this.subscribers) {
+      try { fn({ type, payload, ts: now() }); }
+      catch (e) { Logger.error(LOG_TAG, `Subscriber error: ${e.message}`); }
+    }
+  }
+
+  getStats() {
+    return {
+      ...this.stats,
+      loadedImages: this.images.size,
+      state: this.state,
+      systemDylibs: this.systemDylibs.list().length,
+    };
+  }
+
+  dumpImage(id) {
+    const image = this.images.get(id);
+    if (!image) { Logger.warn(LOG_TAG, `dumpImage: ${id} no existe`); return; }
+    const m = image.toMetadata();
+    Logger.kernel(LOG_TAG, `─── MachO ${m.path} ───`);
+    Logger.kernel(LOG_TAG, `  filetype     : ${m.filetype}`);
+    Logger.kernel(LOG_TAG, `  cputype      : ${m.cputype}`);
+    Logger.kernel(LOG_TAG, `  plataforma   : ${m.platform} (min ${m.minOS}, sdk ${m.sdk})`);
+    Logger.kernel(LOG_TAG, `  uuid         : ${m.uuid}`);
+    Logger.kernel(LOG_TAG, `  image base   : ${m.imageBase}`);
+    Logger.kernel(LOG_TAG, `  entry point  : ${m.entryPoint} (offset ${m.entryOffset})`);
+    Logger.kernel(LOG_TAG, `  stack        : ${m.stackSize} bytes`);
+    Logger.kernel(LOG_TAG, `  segmentos    : ${m.segments.length}`);
+    for (const s of m.segments) {
+      Logger.kernel(LOG_TAG, `    · ${s.name.padEnd(12)} ${s.prot} ${s.vmaddr} +${s.vmsize}`);
+    }
+    Logger.kernel(LOG_TAG, `  dylibs       : ${m.dylibs.length}`);
+    for (const d of m.dylibs) {
+      Logger.kernel(LOG_TAG, `    · ${d.resolved ? '✓' : '✗'} ${d.weak ? '(weak) ' : ''}${d.path}`);
+    }
+    Logger.kernel(LOG_TAG, `  símbolos     : total=${m.symbols.total} globales=${m.symbols.global} locales=${m.symbols.local} undef=${m.symbols.undefined}`);
+    Logger.kernel(LOG_TAG, `  relocs       : rebases=${m.relocations.rebases} binds=${m.relocations.binds}`);
+    Logger.kernel(LOG_TAG, `  tamaño       : disco ${m.sizeOnDisk}B / memoria ${m.sizeInMemory}B`);
+  }
+
+  dump() {
+    const s = this.getStats();
+    Logger.kernel(LOG_TAG, '─── MachOLoader dump ───');
+    Logger.kernel(LOG_TAG, `  estado       : ${s.state}`);
+    Logger.kernel(LOG_TAG, `  imágenes     : ${s.loadedImages} (cargadas ${s.loaded}, fallidas ${s.failed})`);
+    Logger.kernel(LOG_TAG, `  fat/thin     : ${s.fatSlices}/${s.thinImages}`);
+    Logger.kernel(LOG_TAG, `  LC parseados : ${s.loadCommandsParsed}`);
+    Logger.kernel(LOG_TAG, `  símbolos     : ${s.symbolsParsed}`);
+    Logger.kernel(LOG_TAG, `  rebases      : ${s.rebasesApplied}`);
+    Logger.kernel(LOG_TAG, `  binds        : ${s.bindsApplied}`);
+    Logger.kernel(LOG_TAG, `  dylib resolve: ${s.dylibResolutions} ok / ${s.dylibMisses} miss`);
+    Logger.kernel(LOG_TAG, `  bytes mapeados: ${s.bytesMapped}`);
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Helper local
+ * ------------------------------------------------------------------ */
+
+function dirnameOf(p) {
+  const i = p.lastIndexOf('/');
+  return i <= 0 ? '/' : p.slice(0, i);
+}
+
+export { LoadedImage, LoadedSegment, LoadedSection, LoadedDylib, SystemDylibRegistry };
+export default MachOLoader;
