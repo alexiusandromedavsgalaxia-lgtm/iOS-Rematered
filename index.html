@@ -100,5 +100,74 @@
   <div id="root"></div>
 
   <script type="module" src="/src/main.jsx"></script>
+  <script>
+(function() {
+  const box = document.createElement('div');
+  box.id = '__err';
+  box.style.cssText = `
+    position: fixed; left: 0; right: 0; bottom: 0;
+    max-height: 50%; z-index: 999999;
+    background: rgba(0,0,0,0.94); color: #fff;
+    font: 11px ui-monospace, Menlo, monospace;
+    padding: 12px; overflow: auto;
+    white-space: pre-wrap; word-break: break-word;
+    border-top: 2px solid #ff453a;
+    display: none;
+  `;
+  document.body.appendChild(box);
+
+  const show = (msg, color) => {
+    box.style.display = 'block';
+    const line = document.createElement('div');
+    line.style.cssText = 'padding:4px 0;border-bottom:1px solid rgba(255,255,255,.08);color:' + (color || '#fff');
+    line.textContent = msg;
+    box.appendChild(line);
+    box.scrollTop = box.scrollHeight;
+  };
+
+  // Errores no capturados
+  window.addEventListener('error', (e) => {
+    if (e.target && e.target.tagName && e.target.tagName !== 'SCRIPT') return;
+    show('❌ ' + (e.message || 'Error') + ' @ ' + (e.filename || '') + ':' + (e.lineno || ''), '#ff453a');
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    show('❌ Promesa: ' + (e.reason?.message || e.reason), '#ff453a');
+  });
+
+  // Interceptar console.error y console.warn
+  const origErr = console.error;
+  console.error = function(...a) {
+    show('❌ ' + a.map(x => {
+      try { return typeof x === 'object' ? JSON.stringify(x) : String(x); }
+      catch { return String(x); }
+    }).join(' '), '#ff453a');
+    origErr.apply(console, a);
+  };
+  const origWarn = console.warn;
+  console.warn = function(...a) {
+    show('⚠️ ' + a.map(String).join(' '), '#ffd60a');
+    origWarn.apply(console, a);
+  };
+  const origLog = console.log;
+  console.log = function(...a) {
+    show('ℹ️ ' + a.map(x => {
+      try { return typeof x === 'object' ? JSON.stringify(x) : String(x); }
+      catch { return String(x); }
+    }).join(' '), '#8e8e93');
+    origLog.apply(console, a);
+  };
+
+  // Doble tap en la esquina superior izquierda = limpiar
+  let taps = 0, t0 = 0;
+  document.addEventListener('touchstart', (e) => {
+    const t = e.touches[0];
+    if (t.clientX < 60 && t.clientY < 60) {
+      const now = Date.now();
+      if (now - t0 < 400) { box.innerHTML = ''; box.style.display = 'none'; }
+      t0 = now;
+    }
+  });
+})();
+</script>
 
   
