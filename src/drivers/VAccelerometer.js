@@ -844,155 +844,43 @@ export class VAccelerometer {
     this.detection.impact = true;
     this.detection.lastImpactTs = Date.now();
     this.metrics.impactEvents++;
-       const now = Date.now();
-
-    logger.warn(
-      'VAccelerometer',
-      `💥 impacto simulado (mag=${magnitude.toFixed(2)}g)`
-    );
-
     for (const fn of this.motionSubscribers) {
-      try {
-        fn({
-          type: 'impact',
-          magnitude,
-          simulated: true,
-          timestamp: now,
-        });
-      } catch (_) {}
+      try { fn({ type: 'impact', magnitude }); } catch (_) {}
     }
+    this.bus?.raiseInterrupt?.('IRQ_MOTION', {
+      source: 'vaccel', event: 'impact', magnitude,
+    }, 'vaccel');
+    setTimeout(() => { this.detection.impact = false; }, 500);
+    return true;
+  }
 
-    this.bus?.raiseInterrupt?.(
-      'IRQ_MOTION',
-      {
-        source: 'vaccel',
-        event: 'impact',
-        magnitude: parseFloat(magnitude.toFixed(2)),
-        simulated: true,
+  // ═══════════════════════════════════════════════════════════
+  // CONSULTAS
+  // ═══════════════════════════════════════════════════════════
+
+  getSample() {
+    return {
+      ts:      Date.now(),
+      x:       parseFloat(this.current.x.toFixed(4)),
+      y:       parseFloat(this.current.y.toFixed(4)),
+      z:       parseFloat(this.current.z.toFixed(4)),
+      magnitude: parseFloat(Math.hypot(this.current.x, this.current.y, this.current.z).toFixed(4)),
+      gravity: {
+        x: parseFloat(this.gravity.x.toFixed(4)),
+        y: parseFloat(this.gravity.y.toFixed(4)),
+        z: parseFloat(this.gravity.z.toFixed(4)),
       },
-      'vaccel'
-    );
-
-    this._emit();
-    return true;
-  }
-
-  /**
-   * Reinicia todos los estados temporales de detección.
-   */
-  resetDetection() {
-    this.detection.shake = false;
-    this.detection.shakeIntensity = 0;
-    this.detection.lastShakeTs = null;
-
-    this.detection.freeFall = false;
-    this.detection.freeFallStart = null;
-
-    this.detection.impact = false;
-    this.detection.lastImpactTs = null;
-    this.detection.peakG = 0;
-
-    this._freeFallStart = null;
-    this._shakeStart = null;
-    this._peakWindow = [];
-
-    this._emit();
-    return true;
-  }
-
-  /**
-   * Cambia la constante del filtro EMA.
-   */
-  setFilterAlpha(alpha) {
-    const value = Number(alpha);
-
-    if (!Number.isFinite(value)) {
-      logger.warn('VAccelerometer', `alpha inválido: ${alpha}`);
-      return false;
-    }
-
-    this.filter.setAlpha(value);
-    logger.info(
-      'VAccelerometer',
-      `filtro EMA: alpha=${this.filter.alpha.toFixed(3)}`
-    );
-
-    this._emit();
-    return true;
-  }
-
-  // ═══════════════════════════════════════════════════════════
-  // SUSCRIPCIONES
-  // ═══════════════════════════════════════════════════════════
-
-  subscribe(fn) {
-    if (typeof fn !== 'function') return () => {};
-
-    this.subscribers.add(fn);
-
-    return () => {
-      this.unsubscribe(fn);
+      linear: {
+        x: parseFloat(this.linear.x.toFixed(4)),
+        y: parseFloat(this.linear.y.toFixed(4)),
+        z: parseFloat(this.linear.z.toFixed(4)),
+      },
+      mps2: {
+        x: parseFloat((this.current.x * G_TO_MS2).toFixed(3)),
+        y: parseFloat((this.current.y * G_TO_MS2).toFixed(3)),
+        z: parseFloat((this.current.z * G_TO_MS2).toFixed(3)),
+      },
     };
-  }
-
-  unsubscribe(fn) {
-    return this.subscribers.delete(fn);
-  }
-
-  onOrientation(fn) {
-    if (typeof fn !== 'function') return () => {};
-
-    this.orientationSubscribers.add(fn);
-
-    return () => {
-      this.orientationSubscribers.delete(fn);
-    };
-  }
-
-  onActivity(fn) {
-    if (typeof fn !== 'function') return () => {};
-
-    this.activitySubscribers.add(fn);
-
-    return () => {
-      this.activitySubscribers.delete(fn);
-    };
-  }
-
-  onStep(fn) {
-    if (typeof fn !== 'function') return () => {};
-
-    this.stepSubscribers.add(fn);
-
-    return () => {
-      this.stepSubscribers.delete(fn);
-    };
-  }
-
-  onMotion(fn) {
-    if (typeof fn !== 'function') return () => {};
-
-    this.motionSubscribers.add(fn);
-
-    return () => {
-      this.motionSubscribers.delete(fn);
-    };
-  }
-
-  // ═══════════════════════════════════════════════════════════
-  // LECTURAS
-  // ═══════════════════════════════════════════════════════════
-
-  getCurrent() {
-    return { ...this.current };
-  }
-
-  getGravity() {
-    return { ...this.gravity };
-  }
-
-  getLinearAcceleration() {
-    return { ...this.linear };
   }
 
   getOrientation() {
@@ -1003,126 +891,118 @@ export class VAccelerometer {
     return this.activity;
   }
 
-  getHistory(limit = this.history.length) {
-    limit = Math.max(0, Math.floor(Number(limit) || 0));
-    return this.history.last(limit);
-  }
-
-  getMetrics() {
+  getTiltDegrees() {
+    // Ángulo respecto al eje Z (típicamente la pantalla hacia arriba)
+    const g = this.gravity;
+    const mag = Math.hypot(g.x, g.y, g.z);
+    if (mag < 0.5) return { pitch: 0, roll: 0 };
+    const pitch = deg(Math.asin(clamp(-g.x / mag, -1, 1)));
+    const roll  = deg(Math.atan2(g.y, -g.z));
     return {
-      ...this.metrics,
-      throughput: { ...this.throughput },
-      currentPowerMw: this.currentPowerMw,
-      sampleRateHz: this.sampleRateHz,
-      rangeG: this.rangeG,
-      state: this.state,
-      running: this.running,
-      enabled: this.enabled,
-    };
-  }
-
-  getStatus() {
-    return {
-      name: this.name,
-      model: this.model,
-      state: this.state,
-      initialized: this.initialized,
-      running: this.running,
-      enabled: this.enabled,
-      lowPowerMode: this.lowPowerMode,
-
-      rangeG: this.rangeG,
-      sampleRateHz: this.sampleRateHz,
-
-      current: { ...this.current },
-      gravity: { ...this.gravity },
-      linear: { ...this.linear },
-
-      orientation: this.orientation,
-      activity: this.activity,
-
-      steps: this.getStepCount(),
-      detection: { ...this.detection },
-
-      calibration: {
-        calibrated: this.calibration.calibrated,
-        calibratedAt: this.calibration.calibratedAt,
-        noiseG: this.calibration.noiseG,
-        biasG: { ...this.calibration.biasG },
-      },
-
-      powerMw: this.currentPowerMw,
-      throughput: { ...this.throughput },
-      metrics: { ...this.metrics },
+      pitch: parseFloat(pitch.toFixed(2)),
+      roll:  parseFloat(roll.toFixed(2)),
     };
   }
 
   // ═══════════════════════════════════════════════════════════
-  // NOTIFICACIÓN INTERNA
+  // SUSCRIPTORES
   // ═══════════════════════════════════════════════════════════
+
+  subscribe(fn) {
+    this.subscribers.add(fn);
+    return () => this.subscribers.delete(fn);
+  }
+
+  onOrientation(fn) {
+    this.orientationSubscribers.add(fn);
+    return () => this.orientationSubscribers.delete(fn);
+  }
+
+  onActivity(fn) {
+    this.activitySubscribers.add(fn);
+    return () => this.activitySubscribers.delete(fn);
+  }
+
+  onStep(fn) {
+    this.stepSubscribers.add(fn);
+    return () => this.stepSubscribers.delete(fn);
+  }
+
+  onMotion(fn) {
+    this.motionSubscribers.add(fn);
+    return () => this.motionSubscribers.delete(fn);
+  }
 
   _emit() {
-    const payload = {
-      current: { ...this.current },
-      gravity: { ...this.gravity },
-      linear: { ...this.linear },
-
-      orientation: this.orientation,
-      activity: this.activity,
-
-      steps: this.getStepCount(),
-      detection: { ...this.detection },
-
-      state: this.state,
-      running: this.running,
-      enabled: this.enabled,
-
-      sampleRateHz: this.sampleRateHz,
-      rangeG: this.rangeG,
-      powerMw: this.currentPowerMw,
-
-      timestamp: Date.now(),
-    };
-
+    const snap = this.getSnapshot();
     for (const fn of this.subscribers) {
-      try {
-        fn(payload);
-      } catch (_) {}
+      try { fn(snap); } catch (err) {
+        logger.error('VAccelerometer', `subscriber falló: ${err.message}`, err);
+      }
     }
   }
 
   // ═══════════════════════════════════════════════════════════
-  // DESTRUCCIÓN
+  // SNAPSHOTS / STATS
   // ═══════════════════════════════════════════════════════════
 
-  destroy() {
-    if (this.tickId !== null) {
-      clearInterval(this.tickId);
-      this.tickId = null;
-    }
+  getSnapshot() {
+    return {
+      model:        this.model,
+      state:        this.state,
+      rangeG:       this.rangeG,
+      sampleRateHz: this.sampleRateHz,
+      actualHz:     this.throughput.actualHz,
+      sample:       this.getSample(),
+      orientation:  this.orientation,
+      activity:     this.activity,
+      tilt:         this.getTiltDegrees(),
+      steps:        this.getStepCount(),
+      detection:    { ...this.detection },
+      calibrated:   this.calibration.calibrated,
+      powerMw:      parseFloat(this.currentPowerMw.toFixed(3)),
+    };
+  }
 
-    this.running = false;
-    this.initialized = false;
-    this.state = AccelState.OFF;
-    this.currentPowerMw = 0;
+  getStats() {
+    return {
+      model:       this.model,
+      initialized: this.initialized,
+      running:     this.running,
+      state:       this.state,
+      metrics:     { ...this.metrics },
+      throughput:  { ...this.throughput },
+      historySize: this.history.length,
+      calibration: { ...this.calibration },
+    };
+  }
 
-    this.subscribers.clear();
-    this.orientationSubscribers.clear();
-    this.activitySubscribers.clear();
-    this.stepSubscribers.clear();
-    this.motionSubscribers.clear();
+  dump() {
+    const s = this.getStats();
+    const sample = this.getSample();
+    const lines = [
+      `VAccelerometer [${s.state}] — ${s.model}`,
+      `  rango:       ±${this.rangeG}g`,
+      `  sample rate: ${this.sampleRateHz}Hz (actual ${this.throughput.actualHz}Hz)`,
+      `  muestra:     x=${sample.x} y=${sample.y} z=${sample.z} (|a|=${sample.magnitude}g)`,
+      `  gravedad:    x=${sample.gravity.x} y=${sample.gravity.y} z=${sample.gravity.z}`,
+      `  linear:      x=${sample.linear.x} y=${sample.linear.y} z=${sample.linear.z}`,
+      `  orientación: ${this.orientation}`,
+      `  tilt:        pitch=${this.getTiltDegrees().pitch}° roll=${this.getTiltDegrees().roll}°`,
+      `  actividad:   ${this.activity} (desde ${new Date(this.activitySince).toISOString().slice(11, 19)})`,
+      `  pasos:       total=${s.metrics.stepsDetected} hoy=${this.getStepCount().today} cadencia=${this.steps.cadenceSpm.toFixed(1)}/min`,
+      `  eventos:     shake=${s.metrics.shakeEvents} freeFall=${s.metrics.freeFallEvents} impact=${s.metrics.impactEvents}`,
+      `  calibrado:   ${this.calibration.calibrated}`,
+      `  consumo:     ${this.currentPowerMw.toFixed(3)}mW`,
+    ];
+    return lines.join('\n');
+  }
 
+  getHistory(n = 100) {
+    return this.history.last(n);
+  }
+
+  clearHistory() {
     this.history.clear();
-    this.filter.reset();
-
-    this._peakWindow = [];
-    this._freeFallStart = null;
-    this._shakeStart = null;
-
-    this.resetDetection();
-
-    logger.info('VAccelerometer', 'destruido');
   }
 }
-
-export default VAccelerometer;
