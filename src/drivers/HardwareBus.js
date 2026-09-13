@@ -17,7 +17,7 @@ import { VMagnetometer } from './VMagnetometer.js';
 import { VBarometer } from './VBarometer.js';
 import { VAmbientLight } from './VAmbientLight.js';
 import { VProximity } from './VProximity.js';
-import { VGPS } from './VGPS.jsx';
+import { VGPS } from './VGPS.js';
 
 // --- Audio ---
 import { VMicrophone } from './VMicrophone.js';
@@ -37,7 +37,7 @@ import { VCellular } from './VCellular.js';
 // --- Energía / almacenamiento / térmica ---
 import { VBattery } from './VBattery.js';
 import { VStorage } from './VStorage.js';
-import { VThermal } from './VThermal.js';
+import { VThermal } from './VThermal.jsx';
 
 const LOG_TAG = 'BUS';
 
