@@ -605,7 +605,7 @@ const ICONS = {
       'M7 12 h10',
     ],
   },
-  minus-circle: {
+  'minus-circle': {
     paths: [
       { d: 'M12 12 m-10 0 a10 10 0 1 0 20 0 a10 10 0 1 0 -20 0', filled: false },
       'M7 12 h10',
