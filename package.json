@@ -1,10 +1,9 @@
 {
-  "name": "ios-remastered",
+  "name": "rainos-mobile",
   "private": true,
   "version": "1.0.0",
   "type": "module",
   "description": "iOS Remastered — Un OS completo simulado en React. Kernel, drivers, loader Mach-O, apps nativas. Sin librerías externas.",
-  "author": "iOS Remastered",
   "license": "MIT",
 
   "scripts": {
@@ -26,7 +25,11 @@
   },
 
   "engines": {
-    "node": ">=18.0.0"
+    "node": "22.x"
+  },
+
+  "allowScripts": {
+    "esbuild": true
   },
 
   "browserslist": [
