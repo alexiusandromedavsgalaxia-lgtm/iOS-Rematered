@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "type": "module",
   "description": "iOS Remastered — Un OS completo simulado en React. Kernel, drivers, loader Mach-O, apps nativas. Sin librerías externas.",
-  "license": "MIT",
+  "license": "GNU General Public License v3.0",
 
   "scripts": {
     "dev": "vite",
