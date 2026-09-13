@@ -6,21 +6,33 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { fileURLToPath, URL } from 'node:url';
 
+const normalizeDeviceModelImports = () => ({
+  name: 'rainos-normalize-device-model-imports',
+  enforce: 'pre',
+  transform(code, id) {
+    if (!/[/\\]src[/\\]drivers[/\\].+\.(?:js|jsx)$/.test(id)) return null;
+    const legacy = "import { DEVICE_MODEL } from './HardwareBus.js';";
+    if (!code.includes(legacy)) return null;
+    return {
+      code: code.replaceAll(legacy, "import { DEVICE_MODEL } from './DeviceModel.js';"),
+      map: null,
+    };
+  },
+});
+
 export default defineConfig(({ command, mode }) => {
   const isDev = command === 'serve';
   const isProd = command === 'build';
 
   return {
-    /* -------------------------- Plugins -------------------------- */
     plugins: [
       react({
-        // Fast Refresh en dev, sin babel extra
         jsxRuntime: 'automatic',
         fastRefresh: isDev,
       }),
+      normalizeDeviceModelImports(),
     ],
 
-    /* -------------------------- Aliases -------------------------- */
     resolve: {
       alias: {
         '@': fileURLToPath(new URL('./src', import.meta.url)),
@@ -36,21 +48,17 @@ export default defineConfig(({ command, mode }) => {
       extensions: ['.js', '.jsx', '.json'],
     },
 
-    /* -------------------------- Dev server -------------------------- */
     server: {
       port: 5173,
       host: true,
       strictPort: false,
       open: false,
       cors: true,
-
-      // Proxy al backend de Browserless
       proxy: {
         '/api': {
           target: process.env.API_URL || 'http://localhost:3001',
           changeOrigin: true,
           secure: false,
-          // No reescribimos la ruta: /api/proxy → /api/proxy
           rewrite: (path) => path,
           configure: (proxy) => {
             proxy.on('error', (err) => {
@@ -59,14 +67,9 @@ export default defineConfig(({ command, mode }) => {
           },
         },
       },
-
-      // HMR opcional más suave
-      hmr: {
-        overlay: true,
-      },
+      hmr: { overlay: true },
     },
 
-    /* -------------------------- Build -------------------------- */
     build: {
       outDir: 'dist',
       assetsDir: 'assets',
@@ -76,14 +79,10 @@ export default defineConfig(({ command, mode }) => {
       cssMinify: true,
       reportCompressedSize: false,
       chunkSizeWarningLimit: 1200,
-
       rollupOptions: {
         output: {
-          // Chunks separados por capa del OS
           manualChunks: (id) => {
-            if (id.includes('node_modules')) {
-              return 'vendor';
-            }
+            if (id.includes('node_modules')) return 'vendor';
             if (id.includes('/src/engine/')) return 'engine';
             if (id.includes('/src/kernel/')) return 'kernel';
             if (id.includes('/src/drivers/')) return 'drivers';
@@ -98,31 +97,25 @@ export default defineConfig(({ command, mode }) => {
           assetFileNames: 'assets/[name]-[hash].[ext]',
         },
       },
-
-      // Evitamos problemas con el motor de render en canvas
       assetsInlineLimit: 4096,
     },
 
-    /* -------------------------- Optimizaciones -------------------------- */
     optimizeDeps: {
       include: ['react', 'react-dom', 'react-dom/client'],
       exclude: [],
     },
 
-    /* -------------------------- CSS -------------------------- */
     css: {
       devSourcemap: isDev,
       postcss: {},
     },
 
-    /* -------------------------- Define -------------------------- */
     define: {
       __APP_VERSION__: JSON.stringify(process.env.npm_package_version || '1.0.0'),
       __BUILD_TIME__: JSON.stringify(new Date().toISOString()),
       __DEV__: JSON.stringify(isDev),
     },
 
-    /* -------------------------- Preview -------------------------- */
     preview: {
       port: 4173,
       host: true,
@@ -130,16 +123,12 @@ export default defineConfig(({ command, mode }) => {
       open: false,
     },
 
-    /* -------------------------- ESBuild -------------------------- */
     esbuild: {
       jsx: 'automatic',
       legalComments: 'none',
       drop: isProd ? ['debugger'] : [],
-      // No tiramos console en prod: el OS puede querer loguear
-      // drop: isProd ? ['debugger', 'console'] : [],
     },
 
-    /* -------------------------- Logging -------------------------- */
     logLevel: 'info',
     clearScreen: false,
   };
