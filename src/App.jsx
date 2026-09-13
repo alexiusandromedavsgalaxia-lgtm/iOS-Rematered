@@ -8,6 +8,9 @@ import React, {
   useState, useEffect, useRef, useCallback, Suspense,
 } from 'react';
 
+// Instala las compatibilidades del HardwareBus antes de que OSProvider arranque el bus.
+import './drivers/HardwareBusCompat.js';
+
 import { OSProvider, useOS } from './context/OSContext.jsx';
 import { ToastProvider, useToast } from './ui/Toast.jsx';
 import { AlertProvider } from './ui/Alert.jsx';
