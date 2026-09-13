@@ -1,885 +1,586 @@
-// src/drivers/VThermal.js
-// Subsistema térmico global — sensores distribuidos + gestión de throttling
-// Modela disipación acoplada entre subsistemas, aplica políticas de mitigación
-// y notifica a los drivers consumidores (VCPU, VGPU, VStorage, VBattery, VDisplay).
+// src/drivers/VThermal.jsx
+// iOS Remastered — Driver VThermal
+// Sensor térmico virtual con múltiples zonas, mitigación dinámica,
+// política de throttling, histórico y eventos al HardwareBus.
+// Sin dependencias externas.
 
-import { Logger } from '../system/Logger.js';
+import React, {
+  useState, useEffect, useRef, useMemo, useCallback, useReducer,
+} from 'react';
 
-const LOG_TAG = 'THERMAL';
+/* ============================================================================
+ * CONSTANTES
+ * ========================================================================== */
 
-/* ------------------------------------------------------------------ *
- * Sensores térmicos distribuidos
- * ------------------------------------------------------------------ */
-
-export const THERMAL_SENSORS = {
-  SOC:      'soc',        // SoC package (A18 Pro)
-  CPU_P:    'cpu-p',      // cluster performance
-  CPU_E:    'cpu-e',      // cluster efficiency
-  GPU:      'gpu',
-  ANE:      'ane',        // Neural Engine
-  NAND:     'nand',       // almacenamiento
-  DRAM:     'dram',
-  PMIC:     'pmic',       // gestión de energía
-  BATTERY:  'battery',
-  MODEM:    'modem',      // baseband
-  WIFI:     'wifi',
-  DISPLAY:  'display',
-  CHASSIS:  'chassis',    // carcasa (para sensación al tacto)
-  AMBIENT:  'ambient',    // temperatura ambiente estimada
+export const THERMAL_STATE = {
+  NOMINAL:  'nominal',
+  FAIR:     'fair',
+  SERIOUS:  'serious',
+  CRITICAL: 'critical',
+  SHUTDOWN: 'shutdown',
 };
 
-// Metadatos por sensor: temperatura base, límites y coeficiente de acoplamiento
-const SENSOR_META = {
-  [THERMAL_SENSORS.SOC]:      { base: 34, warn: 72, throttle: 82, crit: 95, max: 110, tau: 8.0, weight: 0.9 },
-  [THERMAL_SENSORS.CPU_P]:    { base: 35, warn: 74, throttle: 85, crit: 97, max: 112, tau: 6.0, weight: 0.85 },
-  [THERMAL_SENSORS.CPU_E]:    { base: 33, warn: 68, throttle: 80, crit: 92, max: 108, tau: 7.5, weight: 0.7 },
-  [THERMAL_SENSORS.GPU]:      { base: 34, warn: 70, throttle: 82, crit: 95, max: 110, tau: 6.5, weight: 0.85 },
-  [THERMAL_SENSORS.ANE]:      { base: 33, warn: 70, throttle: 82, crit: 95, max: 110, tau: 7.0, weight: 0.75 },
-  [THERMAL_SENSORS.NAND]:     { base: 32, warn: 60, throttle: 70, crit: 80,  max: 95,  tau: 20.0, weight: 0.6 },
-  [THERMAL_SENSORS.DRAM]:     { base: 33, warn: 75, throttle: 85, crit: 95,  max: 110, tau: 12.0, weight: 0.5 },
-  [THERMAL_SENSORS.PMIC]:     { base: 36, warn: 80, throttle: 90, crit: 100, max: 115, tau: 9.0, weight: 0.65 },
-  [THERMAL_SENSORS.BATTERY]:  { base: 30, warn: 40, throttle: 45, crit: 50,  max: 60,  tau: 60.0, weight: 0.8 },
-  [THERMAL_SENSORS.MODEM]:    { base: 34, warn: 75, throttle: 85, crit: 95,  max: 110, tau: 10.0, weight: 0.55 },
-  [THERMAL_SENSORS.WIFI]:     { base: 33, warn: 75, throttle: 85, crit: 95,  max: 110, tau: 10.0, weight: 0.4 },
-  [THERMAL_SENSORS.DISPLAY]:  { base: 30, warn: 55, throttle: 65, crit: 75,  max: 85,  tau: 15.0, weight: 0.5 },
-  [THERMAL_SENSORS.CHASSIS]:  { base: 28, warn: 42, throttle: 46, crit: 50,  max: 55,  tau: 90.0, weight: 0.4 },
-  [THERMAL_SENSORS.AMBIENT]:  { base: 22, warn: 45, throttle: 50, crit: 55,  max: 60,  tau: 180.0, weight: 0.0 }, // solo lectura
+export const THERMAL_LEVELS = {
+  nominal:  { level: 0, color: '#30d158', label: 'Nominal',   maxTemp: 35, throttle: 1.00 },
+  fair:     { level: 1, color: '#ffd60a', label: 'Templado',  maxTemp: 40, throttle: 0.90 },
+  serious:  { level: 2, color: '#ff9f0a', label: 'Serio',     maxTemp: 45, throttle: 0.70 },
+  critical: { level: 3, color: '#ff453a', label: 'Crítico',   maxTemp: 50, throttle: 0.40 },
+  shutdown: { level: 4, color: '#bf5af2', label: 'Apagado',   maxTemp: 60, throttle: 0.00 },
 };
 
-/* ------------------------------------------------------------------ *
- * Estados térmicos del sistema (estilo iOS)
- * ------------------------------------------------------------------ */
+export const THERMAL_SENSORS = [
+  { id: 'cpu',     label: 'CPU',          icon: 'cpu',                weight: 0.30, baseTemp: 32 },
+  { id: 'gpu',     label: 'GPU',          icon: 'square.grid.3x3',    weight: 0.20, baseTemp: 33 },
+  { id: 'battery', label: 'Batería',      icon: 'battery.100',        weight: 0.15, baseTemp: 28 },
+  { id: 'display', label: 'Pantalla',     icon: 'display',            weight: 0.10, baseTemp: 30 },
+  { id: 'radio',   label: 'Radio',        icon: 'antenna.radiowaves', weight: 0.10, baseTemp: 29 },
+  { id: 'soc',     label: 'SoC',          icon: 'cpu',                weight: 0.15, baseTemp: 34 },
+];
 
-const THERMAL_STATE = {
-  NOMINAL:  'nominal',    // todo bien
-  FAIR:     'fair',       // ligeramente cálido
-  SERIOUS:  'serious',    // throttling moderado
-  CRITICAL: 'critical',   // throttling agresivo
-  SHUTDOWN: 'shutdown',   // apagado por seguridad
+export const MITIGATION = {
+  none:     { label: 'Sin mitigación',         action: 'none' },
+  cpuDown:  { label: 'Reducir CPU',            action: 'cpu' },
+  gpuDown:  { label: 'Reducir GPU',            action: 'gpu' },
+  brightDn: { label: 'Bajar brillo pantalla',  action: 'brightness' },
+  chargeOff:{ label: 'Detener carga',          action: 'charge' },
+  radioOff: { label: 'Reducir radio',          action: 'radio' },
+  full:     { label: 'Mitigación completa',    action: 'full' },
 };
 
-/* ------------------------------------------------------------------ *
- * Niveles de mitigación
- * ------------------------------------------------------------------ */
-
-const MITIGATION = {
-  NONE:               0,
-  THROTTLE_LIGHT:     1,   // -10% rendimiento
-  THROTTLE_MODERATE:  2,   // -25% rendimiento
-  THROTTLE_HEAVY:     3,   // -50% rendimiento
-  THROTTLE_SEVERE:    4,   // -70% rendimiento
-  BRIGHTNESS_REDUCE:  5,   // bajar brillo pantalla
-  CHARGE_PAUSE:       6,   // pausar carga batería
-  RADIO_BACKOFF:      7,   // reducir potencia radios
-  SHUTDOWN:           8,   // apagado crítico
+export const THERMAL_SCENARIOS = {
+  idle:      { label: 'Reposo',       load: 0.05, ambient: 22 },
+  light:     { label: 'Uso ligero',   load: 0.20, ambient: 24 },
+  normal:    { label: 'Uso normal',   load: 0.45, ambient: 25 },
+  heavy:     { label: 'Uso intenso',  load: 0.75, ambient: 27 },
+  gaming:    { label: 'Juego',        load: 0.95, ambient: 28 },
+  charging:  { label: 'Cargando',     load: 0.30, ambient: 26, charge: true },
+  benchmark: { label: 'Benchmark',    load: 1.00, ambient: 30 },
 };
 
-// Acción asociada a cada nivel (para notificar a subsistemas)
-const MITIGATION_EFFECTS = {
-  [MITIGATION.THROTTLE_LIGHT]:    { cpu: 0.90, gpu: 0.90, nand: 1.00, radio: 1.00, display: 1.00, charge: true },
-  [MITIGATION.THROTTLE_MODERATE]: { cpu: 0.75, gpu: 0.75, nand: 0.95, radio: 0.95, display: 1.00, charge: true },
-  [MITIGATION.THROTTLE_HEAVY]:    { cpu: 0.50, gpu: 0.50, nand: 0.90, radio: 0.85, display: 0.85, charge: false },
-  [MITIGATION.THROTTLE_SEVERE]:   { cpu: 0.30, gpu: 0.30, nand: 0.80, radio: 0.70, display: 0.70, charge: false },
-  [MITIGATION.SHUTDOWN]:          { cpu: 0.00, gpu: 0.00, nand: 0.00, radio: 0.00, display: 0.00, charge: false },
-};
+/* ============================================================================
+ * UTILIDADES
+ * ========================================================================== */
 
-/* ------------------------------------------------------------------ *
- * Helpers
- * ------------------------------------------------------------------ */
+let _seq = 0;
+const uid = (p = 'tmp') => `${p}_${Date.now().toString(36)}_${(++_seq).toString(36)}`;
 
-function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
-function lerp(a, b, t)    { return a + (b - a) * t; }
-function round(v, d = 2)  { const f = 10 ** d; return Math.round(v * f) / f; }
-
-function gaussianNoise(sigma) {
-  let u = 0, v = 0;
-  while (u === 0) u = Math.random();
-  while (v === 0) v = Math.random();
-  return sigma * Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+function clamp(v, min, max) {
+  return Math.max(min, Math.min(max, v));
 }
 
-// Ecuación de enfriamiento newtoniano: T(t+dt) = T_env + (T - T_env) * exp(-dt/tau)
-function coolTowards(current, target, tauS, dtS) {
-  const k = Math.exp(-dtS / tauS);
-  return target + (current - target) * k;
+function round(n, decimals = 1) {
+  const m = Math.pow(10, decimals);
+  return Math.round(n * m) / m;
 }
 
-/* ------------------------------------------------------------------ *
- * Perfiles térmicos (ambiente + carga)
- * ------------------------------------------------------------------ */
+function now() { return Date.now(); }
 
-const THERMAL_SCENARIOS = {
-  IDLE:        { name: 'idle',        ambientC: 22, loadFactor: 0.05, sunExposure: false },
-  LIGHT:       { name: 'light',       ambientC: 24, loadFactor: 0.20, sunExposure: false },
-  MEDIUM:      { name: 'medium',      ambientC: 25, loadFactor: 0.50, sunExposure: false },
-  HEAVY:       { name: 'heavy',       ambientC: 26, loadFactor: 0.80, sunExposure: false },
-  GAMING:      { name: 'gaming',      ambientC: 27, loadFactor: 0.95, sunExposure: false },
-  CHARGING:    { name: 'charging',    ambientC: 24, loadFactor: 0.30, sunExposure: false },
-  HOT_CAR:     { name: 'hot-car',     ambientC: 55, loadFactor: 0.60, sunExposure: true  },
-  DIRECT_SUN:  { name: 'direct-sun',  ambientC: 45, loadFactor: 0.40, sunExposure: true  },
-  COLD:        { name: 'cold',        ambientC:  5, loadFactor: 0.30, sunExposure: false },
-  EXTREME_COLD:{ name: 'extreme-cold',ambientC: -15, loadFactor: 0.30, sunExposure: false },
+/* Ruido blanco determinista por sensor + tiempo */
+function noise(sensor, t) {
+  const seed = sensor.id.charCodeAt(0) * 37 + Math.floor(t / 200);
+  const x = Math.sin(seed * 12.9898) * 43758.5453;
+  return (x - Math.floor(x)) - 0.5; // [-0.5, 0.5]
+}
+
+/* Estado térmico a partir de la temperatura */
+function stateFromTemp(temp) {
+  if (temp >= 55) return THERMAL_STATE.SHUTDOWN;
+  if (temp >= 47) return THERMAL_STATE.CRITICAL;
+  if (temp >= 43) return THERMAL_STATE.SERIOUS;
+  if (temp >= 38) return THERMAL_STATE.FAIR;
+  return THERMAL_STATE.NOMINAL;
+}
+
+/* Throttle factor a partir del estado */
+function throttleFromState(state) {
+  return THERMAL_LEVELS[state]?.throttle ?? 1;
+}
+
+/* ============================================================================
+ * REDUCER
+ * ========================================================================== */
+
+const initialState = {
+  ready: false,
+  scenario: 'normal',
+  ambient: 25,
+  sensors: {},
+  aggregate: 32,
+  state: THERMAL_STATE.NOMINAL,
+  throttle: 1,
+  mitigations: [],
+  history: [],
+  peakTemp: 0,
+  peakAt: 0,
+  warnings: 0,
+  shutdowns: 0,
+  manualOverride: null,
+  charging: false,
 };
 
-/* ------------------------------------------------------------------ *
- * Clase principal
- * ------------------------------------------------------------------ */
+function reducer(state, action) {
+  switch (action.type) {
+    case 'INIT':
+      return { ...state, ...action.state, ready: true };
 
-export class VThermal {
-  constructor(bus = null, options = {}) {
-    this.bus = bus;
-
-    // --- Sensores: temperatura actual por sensor ---
-    this.sensors = {};
-    for (const id of Object.values(THERMAL_SENSORS)) {
-      this.sensors[id] = {
-        id,
-        tempC: SENSOR_META[id].base,
-        meta: SENSOR_META[id],
-        powered: true,
-        lastReadAt: 0,
-        trend: 0,        // °C/s
-        historyMax: 60,
-        history: [],
+    case 'SET_SCENARIO': {
+      const sc = THERMAL_SCENARIOS[action.scenario] || THERMAL_SCENARIOS.normal;
+      return {
+        ...state,
+        scenario: action.scenario,
+        ambient: sc.ambient,
+        charging: !!sc.charge,
       };
     }
 
-    // --- Estado global ---
-    this.state = THERMAL_STATE.NOMINAL;
-    this.mitigationLevel = MITIGATION.NONE;
-    this.powered = true;
-    this.scenario = THERMAL_SCENARIOS.IDLE;
-    this.ambientC = 22;
+    case 'SET_AMBIENT':
+      return { ...state, ambient: clamp(action.value, -10, 50) };
 
-    // --- Sumideros de calor (heat sources) ---
-    // Cada subsistema genera calor según su carga (inyectada externamente)
-    this.heatSources = {
-      cpu:      { load: 0, watt: 0, peakWatt: 8.0 },   // A18 Pro P-core
-      gpu:      { load: 0, watt: 0, peakWatt: 6.0 },
-      ane:      { load: 0, watt: 0, peakWatt: 3.0 },
-      nand:     { load: 0, watt: 0, peakWatt: 1.5 },
-      modem:    { load: 0, watt: 0, peakWatt: 2.5 },
-      wifi:     { load: 0, watt: 0, peakWatt: 1.0 },
-      display:  { load: 0, watt: 0, peakWatt: 2.0 },
-      battery:  { load: 0, watt: 0, peakWatt: 3.0 },   // carga
+    case 'TICK': {
+      const s = action.payload;
+      const newState = stateFromTemp(s.aggregate);
+      const throttle = throttleFromState(newState);
+      const level = THERMAL_LEVELS[newState];
+
+      const mitigations = [];
+      if (newState === THERMAL_STATE.FAIR) {
+        mitigations.push('brightDn');
+      } else if (newState === THERMAL_STATE.SERIOUS) {
+        mitigations.push('brightDn', 'cpuDown');
+      } else if (newState === THERMAL_STATE.CRITICAL) {
+        mitigations.push('brightDn', 'cpuDown', 'gpuDown', 'chargeOff');
+      } else if (newState === THERMAL_STATE.SHUTDOWN) {
+        mitigations.push('full');
+      }
+
+      const history = [
+        ...state.history.slice(-119),
+        { t: s.t, temp: s.aggregate, state: newState },
+      ];
+
+      const peakTemp = s.aggregate > state.peakTemp ? s.aggregate : state.peakTemp;
+      const peakAt = s.aggregate > state.peakTemp ? s.t : state.peakAt;
+
+      const crossedWarn = state.state !== newState &&
+        (newState === THERMAL_STATE.SERIOUS || newState === THERMAL_STATE.CRITICAL);
+      const crossedShutdown = state.state !== newState && newState === THERMAL_STATE.SHUTDOWN;
+
+      return {
+        ...state,
+        sensors: s.sensors,
+        aggregate: s.aggregate,
+        state: newState,
+        throttle,
+        mitigations,
+        history,
+        peakTemp,
+        peakAt,
+        warnings: state.warnings + (crossedWarn ? 1 : 0),
+        shutdowns: state.shutdowns + (crossedShutdown ? 1 : 0),
+      };
+    }
+
+    case 'OVERRIDE':
+      return { ...state, manualOverride: action.value };
+
+    case 'CLEAR_OVERRIDE':
+      return { ...state, manualOverride: null };
+
+    case 'RESET_STATS':
+      return { ...state, peakTemp: 0, peakAt: 0, warnings: 0, shutdowns: 0, history: [] };
+
+    case 'SHUTDOWN':
+      return {
+        ...state,
+        state: THERMAL_STATE.SHUTDOWN,
+        aggregate: 60,
+        throttle: 0,
+        mitigations: ['full'],
+      };
+
+    default:
+      return state;
+  }
+}
+
+/* ============================================================================
+ * MOTOR DE SIMULACIÓN
+ * ========================================================================== */
+
+function simulateThermal({ scenario, ambient, elapsed, prevSensors, charging }) {
+  const sc = THERMAL_SCENARIOS[scenario] || THERMAL_SCENARIOS.normal;
+  const load = sc.load;
+  const t = now();
+
+  const sensors = {};
+  let weightedSum = 0;
+  let totalWeight = 0;
+
+  for (const s of THERMAL_SENSORS) {
+    // Temperatura objetivo del sensor
+    const target = s.baseTemp + ambient * 0.35 + load * 18 + (charging && s.id === 'battery' ? 6 : 0);
+
+    // Suavizado: la temperatura se mueve hacia el target
+    const prev = prevSensors[s.id]?.temp ?? target - 2;
+    const diff = target - prev;
+    const inertia = s.id === 'battery' ? 0.02 : 0.06;
+    const temp = prev + diff * inertia + noise(s, t) * 0.4;
+
+    sensors[s.id] = {
+      id: s.id,
+      label: s.label,
+      icon: s.icon,
+      temp: round(clamp(temp, -20, 90), 1),
+      weight: s.weight,
+      t,
     };
 
-    // --- Fuentes vinculadas (drivers que reportan load) ---
-    this.linkedCPU = null;
-    this.linkedGPU = null;
-    this.linkedStorage = null;
-    this.linkedBattery = null;
-    this.linkedWiFi = null;
-    this.linkedBT = null;
-    this.linkedCellular = null;
-    this.linkedDisplay = null;
+    weightedSum += sensors[s.id].temp * s.weight;
+    totalWeight += s.weight;
+  }
 
-    // --- Políticas ---
-    this.autoThrottleEnabled = true;
-    this.chargeThrottleEnabled = true;
-    this.displayDimEnabled = true;
-    this.shutdownThresholdC = 105;   // SoC
-    this.hysteresisC = 3;            // grados de histéresis para bajar estado
+  const aggregate = round(weightedSum / totalWeight, 1);
 
-    // --- Watchdog ---
-    this._watchdogEnabled = true;
-    this._lastTickAt = 0;
-    this._watchdogFires = 0;
+  return { sensors, aggregate, t, elapsed };
+}
 
-    // --- Cola IRQ ---
-    this.irqQueue = [];
-    this.irqDropped = 0;
+/* ============================================================================
+ * HOOK PRINCIPAL
+ * ========================================================================== */
 
-    // --- Historial global ---
-    this.historyMax = 300;
-    this.history = [];
+function useThermal({ tickMs = 500, onEvent } = {}) {
+  const [state, dispatch] = useReducer(reducer, initialState);
+  const stateRef = useRef(state);
+  const timerRef = useRef(null);
+  const startRef = useRef(now());
+  const subscribersRef = useRef(new Set());
 
-    // --- Suscriptores ---
-    this.subscribers = new Set();
+  // Mantener una referencia del estado actual para el loop
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
 
-    // --- Métricas ---
-    this.stats = {
-      ticks: 0,
-      powerOnMs: 0,
-      stateTransitions: 0,
-      mitigationChanges: 0,
-      throttleEvents: 0,
-      shutdowns: 0,
-      chargePauses: 0,
-      dimEvents: 0,
-      peakCpuTemp: 0,
-      peakGpuTemp: 0,
-      peakBatteryTemp: 0,
-      peakSocTemp: 0,
-      timeInState: {
-        nominal: 0, fair: 0, serious: 0, critical: 0, shutdown: 0,
-      },
-      lastTickAt: 0,
-    };
+  /* --------------------------- Loop de simulación --------------------------- */
 
-    // --- Internos ---
-    this._t = 0;
+  useEffect(() => {
+    const tick = () => {
+      const current = stateRef.current;
+      const override = current.manualOverride;
 
-    // --- Registro en bus ---
-    if (this.bus && typeof this.bus.registerDevice === 'function') {
-      this.bus.registerDevice({
-        id: 'thermal0',
-        kind: 'thermal-manager',
-        model: 'Distributed thermal sensors',
-        capabilities: ['temp-read', 'throttle', 'mitigation', 'shutdown'],
-        irq: 'IRQ_THERMAL',
+      let scenario = current.scenario;
+      let ambient = current.ambient;
+      if (override) {
+        scenario = override.scenario ?? scenario;
+        ambient = override.ambient ?? ambient;
+      }
+
+      const result = simulateThermal({
+        scenario,
+        ambient,
+        elapsed: now() - startRef.current,
+        prevSensors: current.sensors,
+        charging: current.charging || (override && override.charging),
       });
-    }
 
-    Logger.debug(LOG_TAG, `VThermal instanciado (${Object.keys(this.sensors).length} sensores)`);
-  }
+      dispatch({ type: 'TICK', payload: result });
 
-  /* ================================================================ *
-   * Vinculaciones
-   * ================================================================ */
-
-  linkCPU(cpu)         { this.linkedCPU = cpu;       Logger.debug(LOG_TAG, 'Vinculado a VCPU'); }
-  linkGPU(gpu)         { this.linkedGPU = gpu;       Logger.debug(LOG_TAG, 'Vinculado a VGPU'); }
-  linkStorage(st)      { this.linkedStorage = st;    Logger.debug(LOG_TAG, 'Vinculado a VStorage'); }
-  linkBattery(bat)     { this.linkedBattery = bat;   Logger.debug(LOG_TAG, 'Vinculado a VBattery'); }
-  linkWiFi(wifi)       { this.linkedWiFi = wifi;     Logger.debug(LOG_TAG, 'Vinculado a VWiFi'); }
-  linkBT(bt)           { this.linkedBT = bt;         Logger.debug(LOG_TAG, 'Vinculado a VBT'); }
-  linkCellular(cell)   { this.linkedCellular = cell; Logger.debug(LOG_TAG, 'Vinculado a VCellular'); }
-  linkDisplay(disp)    { this.linkedDisplay = disp;  Logger.debug(LOG_TAG, 'Vinculado a VDisplay'); }
-
-  /* ================================================================ *
-   * Ciclo de vida
-   * ================================================================ */
-
-  powerOn() {
-    this.powered = true;
-    Logger.info(LOG_TAG, 'Gestión térmica activada');
-  }
-
-  powerOff() {
-    this.powered = false;
-    Logger.info(LOG_TAG, 'Gestión térmica desactivada');
-  }
-
-  reset() {
-    for (const s of Object.values(this.sensors)) {
-      s.tempC = s.meta.base;
-      s.trend = 0;
-      s.history = [];
-    }
-    this.state = THERMAL_STATE.NOMINAL;
-    this.mitigationLevel = MITIGATION.NONE;
-    this.irqQueue = [];
-    Logger.warn(LOG_TAG, 'Estado térmico reseteado');
-  }
-
-  /* ================================================================ *
-   * Configuración / escenarios
-   * ================================================================ */
-
-  setScenario(name) {
-    const key = String(name).toUpperCase().replace(/-/g, '_');
-    const s = THERMAL_SCENARIOS[key];
-    if (!s) {
-      Logger.warn(LOG_TAG, `Escenario desconocido: ${name}`);
-      return false;
-    }
-    this.scenario = s;
-    this.ambientC = s.ambientC;
-    this.sensors[THERMAL_SENSORS.AMBIENT].tempC = s.ambientC;
-    Logger.debug(LOG_TAG, `Escenario: ${s.name} (ambient=${s.ambientC}°C, load=${s.loadFactor})`);
-    return true;
-  }
-
-  setAmbient(c) {
-    this.ambientC = clamp(c, -30, 80);
-    this.sensors[THERMAL_SENSORS.AMBIENT].tempC = this.ambientC;
-  }
-
-  setAutoThrottle(on)    { this.autoThrottleEnabled = !!on; }
-  setChargeThrottle(on)  { this.chargeThrottleEnabled = !!on; }
-  setDisplayDim(on)      { this.displayDimEnabled = !!on; }
-  setShutdownThreshold(c){ this.shutdownThresholdC = clamp(c, 80, 130); }
-
-  /* ================================================================ *
-   * Lectura de temperatura
-   * ================================================================ */
-
-  getTemp(sensorId) {
-    const s = this.sensors[sensorId];
-    return s ? s.tempC : null;
-  }
-
-  getMaxTemp() {
-    let max = -Infinity, id = null;
-    for (const s of Object.values(this.sensors)) {
-      if (s.id === THERMAL_SENSORS.AMBIENT) continue;
-      if (s.tempC > max) { max = s.tempC; id = s.id; }
-    }
-    return { sensor: id, tempC: max };
-  }
-
-  getAvgTemp() {
-    let sum = 0, count = 0;
-    for (const s of Object.values(this.sensors)) {
-      if (s.id === THERMAL_SENSORS.AMBIENT) continue;
-      sum += s.tempC;
-      count++;
-    }
-    return sum / Math.max(1, count);
-  }
-
-  /* ================================================================ *
-   * Inyección de carga (llamada por el kernel u otros drivers)
-   * ================================================================ */
-
-  reportLoad(source, load) {
-    if (source in this.heatSources) {
-      this.heatSources[source].load = clamp(load, 0, 1);
-    }
-  }
-
-  _computeHeatSources() {
-    // Si tenemos drivers vinculados, usamos sus métricas reales
-    if (this.linkedCPU?.getStats) {
-      const s = this.linkedCPU.getStats();
-      const util = s.utilization ?? s.load ?? 0;
-      this.heatSources.cpu.load = clamp(util, 0, 1);
-    }
-    if (this.linkedGPU?.getStats) {
-      const s = this.linkedGPU.getStats();
-      const util = s.utilization ?? s.load ?? 0;
-      this.heatSources.gpu.load = clamp(util, 0, 1);
-    }
-    if (this.linkedStorage?.getStats) {
-      const s = this.linkedStorage.getStats();
-      const util = s.utilization ?? (s.readThroughput > 0 ? 0.5 : 0.1);
-      this.heatSources.nand.load = clamp(util, 0, 1);
-    }
-    if (this.linkedWiFi?.getStats) {
-      const s = this.linkedWiFi.getStats();
-      this.heatSources.wifi.load = s.state === 'associated' ? clamp(s.throughputMbps / 1000, 0, 1) : 0.05;
-    }
-    if (this.linkedCellular?.getStats) {
-      const s = this.linkedCellular.getStats();
-      this.heatSources.modem.load = s.state === 'data-connected' ? 0.5 : 0.05;
-    }
-    if (this.linkedDisplay?.getStats) {
-      const s = this.linkedDisplay.getStats();
-      this.heatSources.display.load = clamp(s.brightness / 1000, 0, 1);
-    }
-    if (this.linkedBattery?.getStats) {
-      const s = this.linkedBattery.getStats();
-      const charging = s.state === 'charging' || s.state === 'fast-charging';
-      this.heatSources.battery.load = charging ? 1.0 : 0.0;
-    }
-
-    // Si no hay drivers vinculados, usamos el loadFactor del escenario
-    if (!this.linkedCPU) this.heatSources.cpu.load = this.scenario.loadFactor;
-    if (!this.linkedGPU) this.heatSources.gpu.load = this.scenario.loadFactor * 0.7;
-    if (!this.linkedStorage) this.heatSources.nand.load = this.scenario.loadFactor * 0.3;
-
-    // Watt disipados
-    for (const k of Object.keys(this.heatSources)) {
-      const h = this.heatSources[k];
-      h.watt = h.peakWatt * h.load;
-    }
-  }
-
-  /* ================================================================ *
-   * Modelo térmico (acoplamiento entre sensores)
-   * ================================================================ */
-
-  _updateSensorTemps(dtS) {
-    const ambient = this.ambientC;
-    const sunBoost = this.scenario.sunExposure ? 6 : 0;
-
-    // Matriz de acoplamiento simplificada: cada sensor recibe calor de
-    // su fuente directa + algo de los vecinos.
-    const coupling = {
-      [THERMAL_SENSORS.SOC]:     { cpu: 0.55, gpu: 0.25, ane: 0.10, pmic: 0.10 },
-      [THERMAL_SENSORS.CPU_P]:   { cpu: 1.00, soc: 0.30 },
-      [THERMAL_SENSORS.CPU_E]:   { cpu: 0.60, soc: 0.30 },
-      [THERMAL_SENSORS.GPU]:     { gpu: 1.00, soc: 0.30 },
-      [THERMAL_SENSORS.ANE]:     { ane: 1.00, soc: 0.25 },
-      [THERMAL_SENSORS.NAND]:    { nand: 1.00 },
-      [THERMAL_SENSORS.DRAM]:    { soc: 0.40, gpu: 0.30 },
-      [THERMAL_SENSORS.PMIC]:    { pmic: 0.70, battery: 0.30 },
-      [THERMAL_SENSORS.BATTERY]: { battery: 1.00, pmic: 0.20 },
-      [THERMAL_SENSORS.MODEM]:   { modem: 1.00 },
-      [THERMAL_SENSORS.WIFI]:    { wifi: 1.00 },
-      [THERMAL_SENSORS.DISPLAY]: { display: 1.00, soc: 0.10 },
-      [THERMAL_SENSORS.CHASSIS]: { soc: 0.20, display: 0.15, battery: 0.10, nand: 0.10 },
-      [THERMAL_SENSORS.AMBIENT]: {},
+      // Notificar a suscriptores
+      for (const fn of subscribersRef.current) {
+        try { fn(result); } catch (e) { console.error(e); }
+      }
     };
 
-    // Ganancia de inyección: cuántos °C aporta cada watt (por segundo en régimen)
-    const WATT_TO_DELTA_C = 1.8;
+    // Primer tick inmediato
+    tick();
 
-    for (const s of Object.values(this.sensors)) {
-      const meta = s.meta;
-      if (s.id === THERMAL_SENSORS.AMBIENT) {
-        // El sensor ambiente sigue al ambiente con suavizado
-        s.tempC = coolTowards(s.tempC, ambient, meta.tau, dtS);
-        continue;
-      }
+    timerRef.current = setInterval(tick, tickMs);
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tickMs]);
 
-      // 1) Calor inyectado por fuentes acopladas a este sensor
-      let injectedHeat = 0;
-      const map = coupling[s.id] || {};
-      for (const [src, weight] of Object.entries(map)) {
-        const h = this.heatSources[src];
-        if (h) injectedHeat += h.watt * weight * WATT_TO_DELTA_C;
-      }
+  /* --------------------------- Eventos al OS --------------------------- */
 
-      // 2) Temperatura objetivo considerando aporte + ambiente + sol
-      const targetEnv = ambient + sunBoost;
-      const target = targetEnv + injectedHeat * meta.tau / 8;
+  const prevStateRef = useRef(state.state);
+  useEffect(() => {
+    if (!onEvent) return;
+    if (state.state !== prevStateRef.current) {
+      const from = prevStateRef.current;
+      const to = state.state;
+      prevStateRef.current = to;
 
-      // 3) Enfriamiento newtoniano hacia el objetivo
-      const prev = s.tempC;
-      s.tempC = coolTowards(s.tempC, target, meta.tau, dtS);
-
-      // 4) Ruido de medición
-      s.tempC += gaussianNoise(0.05);
-
-      // 5) Tendencia (°C/s)
-      s.trend = (s.tempC - prev) / dtS;
-
-      // 6) Historial por sensor
-      s.history.push(s.tempC);
-      if (s.history.length > s.historyMax) s.history.shift();
-
-      s.lastReadAt = this._t;
-    }
-  }
-
-  /* ================================================================ *
-   * Cálculo del estado térmico global
-   * ================================================================ */
-
-  _computeState() {
-    const soc = this.getTemp(THERMAL_SENSORS.SOC);
-    const cpu = this.getTemp(THERMAL_SENSORS.CPU_P);
-    const gpu = this.getTemp(THERMAL_SENSORS.GPU);
-    const bat = this.getTemp(THERMAL_SENSORS.BATTERY);
-    const nand = this.getTemp(THERMAL_SENSORS.NAND);
-
-    // Temperatura "de decisión": máximo ponderado
-    const weighted = Math.max(
-      soc * 1.0,
-      cpu * 0.95,
-      gpu * 0.95,
-      bat * 1.1,
-      nand * 0.9,
-    );
-
-    const meta = SENSOR_META[THERMAL_SENSORS.SOC];
-
-    // Umbrales del estado global
-    const nominalMax  = meta.warn - 6;
-    const fairMax     = meta.warn + 2;
-    const seriousMax  = meta.throttle;
-    const criticalMax = meta.crit;
-
-    let newState = THERMAL_STATE.NOMINAL;
-    if (weighted >= this.shutdownThresholdC) newState = THERMAL_STATE.SHUTDOWN;
-    else if (weighted >= criticalMax) newState = THERMAL_STATE.CRITICAL;
-    else if (weighted >= seriousMax) newState = THERMAL_STATE.SERIOUS;
-    else if (weighted >= fairMax) newState = THERMAL_STATE.FAIR;
-    else if (weighted >= nominalMax) newState = THERMAL_STATE.FAIR;
-
-    // Histéresis: solo bajamos estado si hemos bajado > hysteresisC
-    const order = [THERMAL_STATE.NOMINAL, THERMAL_STATE.FAIR, THERMAL_STATE.SERIOUS, THERMAL_STATE.CRITICAL, THERMAL_STATE.SHUTDOWN];
-    const curIdx = order.indexOf(this.state);
-    const newIdx = order.indexOf(newState);
-    if (newIdx < curIdx) {
-      const refTemp = {
-        [THERMAL_STATE.FAIR]:     fairMax,
-        [THERMAL_STATE.SERIOUS]:  seriousMax,
-        [THERMAL_STATE.CRITICAL]: criticalMax,
-        [THERMAL_STATE.SHUTDOWN]: this.shutdownThresholdC,
-      }[this.state];
-      if (weighted > refTemp - this.hysteresisC) {
-        newState = this.state;   // mantener estado actual hasta enfriar
+      if (to === THERMAL_STATE.SERIOUS) {
+        onEvent({ type: 'thermal:serious', from, to, temp: state.aggregate });
+      } else if (to === THERMAL_STATE.CRITICAL) {
+        onEvent({ type: 'thermal:critical', from, to, temp: state.aggregate });
+      } else if (to === THERMAL_STATE.SHUTDOWN) {
+        onEvent({ type: 'thermal:shutdown', from, to, temp: state.aggregate });
+      } else if (to === THERMAL_STATE.NOMINAL) {
+        onEvent({ type: 'thermal:nominal', from, to, temp: state.aggregate });
       }
     }
+  }, [state.state, state.aggregate, onEvent]);
 
-    if (newState !== this.state) {
-      this._transitionState(newState, weighted);
+  /* --------------------------- API --------------------------- */
+
+  const api = useMemo(() => ({
+    setScenario(scenario) {
+      if (!THERMAL_SCENARIOS[scenario]) return false;
+      dispatch({ type: 'SET_SCENARIO', scenario });
+      return true;
+    },
+
+    setAmbient(value) {
+      dispatch({ type: 'SET_AMBIENT', value });
+    },
+
+    setOverride(value) {
+      dispatch({ type: 'OVERRIDE', value });
+    },
+
+    clearOverride() {
+      dispatch({ type: 'CLEAR_OVERRIDE' });
+    },
+
+    forceShutdown() {
+      dispatch({ type: 'SHUTDOWN' });
+    },
+
+    resetStats() {
+      dispatch({ type: 'RESET_STATS' });
+    },
+
+    subscribe(fn) {
+      subscribersRef.current.add(fn);
+      return () => subscribersRef.current.delete(fn);
+    },
+
+    getState() {
+      return stateRef.current;
+    },
+
+    getSensors() {
+      return Object.values(stateRef.current.sensors);
+    },
+
+    getSensor(id) {
+      return stateRef.current.sensors[id] || null;
+    },
+  }), []);
+
+  return { state, dispatch, api };
+}
+
+/* ============================================================================
+ * HOOKS AUXILIARES
+ * ========================================================================== */
+
+function useThermalState(state) {
+  return THERMAL_LEVELS[state] || THERMAL_LEVELS.nominal;
+}
+
+function useThermalColor(temp) {
+  if (temp >= 50) return '#bf5af2';
+  if (temp >= 45) return '#ff453a';
+  if (temp >= 40) return '#ff9f0a';
+  if (temp >= 35) return '#ffd60a';
+  return '#30d158';
+}
+
+/* ============================================================================
+ * COMPONENTES REUTILIZABLES
+ * ========================================================================== */
+
+function ThermalBar({ temp, max = 60, height = 6, showLabel = false }) {
+  const color = useThermalColor(temp);
+  const pct = clamp((temp / max) * 100, 0, 100);
+  return (
+    <div className="vt-bar-wrap">
+      <div className="vt-bar" style={{ height }}>
+        <div
+          className="vt-bar-fill"
+          style={{ width: `${pct}%`, background: color }}
+        />
+      </div>
+      {showLabel && (
+        <span className="vt-bar-label" style={{ color }}>
+          {round(temp, 1)} °C
+        </span>
+      )}
+    </div>
+  );
+}
+
+function ThermalChip({ state }) {
+  const meta = THERMAL_LEVELS[state] || THERMAL_LEVELS.nominal;
+  return (
+    <span className="vt-chip" style={{ background: meta.color }}>
+      {meta.label}
+    </span>
+  );
+}
+
+function ThermalSensorRow({ sensor }) {
+  const color = useThermalColor(sensor.temp);
+  return (
+    <div className="vt-sensor-row">
+      <span className="vt-sensor-label">{sensor.label}</span>
+      <div className="vt-sensor-bar">
+        <div
+          className="vt-sensor-bar-fill"
+          style={{ width: `${clamp((sensor.temp / 60) * 100, 0, 100)}%`, background: color }}
+        />
+      </div>
+      <span className="vt-sensor-temp" style={{ color }}>
+        {sensor.temp.toFixed(1)}°
+      </span>
+    </div>
+  );
+}
+
+/* ============================================================================
+ * CLASE VThermal — driver para el HardwareBus
+ * ========================================================================== */
+
+class VThermalDriver {
+  constructor(opts = {}) {
+    this.name = 'VThermal';
+    this.version = '1.0.0';
+    this.tickMs = opts.tickMs || 500;
+    this.startRef = now();
+    this.timer = null;
+    this.listeners = new Set();
+    this.state = {
+      scenario: 'normal',
+      ambient: 25,
+      sensors: {},
+      aggregate: 32,
+      state: THERMAL_STATE.NOMINAL,
+      throttle: 1,
+      mitigations: [],
+      peakTemp: 0,
+    };
+    this.charging = false;
+  }
+
+  probe() {
+    return {
+      ok: true,
+      name: this.name,
+      sensors: THERMAL_SENSORS.map((s) => s.id),
+      scenario: this.state.scenario,
+    };
+  }
+
+  start() {
+    if (this.timer) return;
+    const tick = () => {
+      const result = simulateThermal({
+        scenario: this.state.scenario,
+        ambient: this.state.ambient,
+        elapsed: now() - this.startRef,
+        prevSensors: this.state.sensors,
+        charging: this.charging,
+      });
+
+      const newState = stateFromTemp(result.aggregate);
+      const throttle = throttleFromState(newState);
+
+      this.state = {
+        ...this.state,
+        sensors: result.sensors,
+        aggregate: result.aggregate,
+        state: newState,
+        throttle,
+        peakTemp: Math.max(this.state.peakTemp, result.aggregate),
+      };
+
+      for (const fn of this.listeners) {
+        try { fn(this.state); } catch (e) { console.error(e); }
+      }
+    };
+
+    tick();
+    this.timer = setInterval(tick, this.tickMs);
+  }
+
+  stop() {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
     }
   }
 
-  _transitionState(to, tempC) {
-    const from = this.state;
-    this.state = to;
-    this.stats.stateTransitions++;
-    Logger.warn(LOG_TAG, `Estado térmico: ${from} → ${to} (${round(tempC, 1)}°C)`);
-    this._emit('state', { from, to, tempC: round(tempC, 1) });
-    this._pushIRQ('IRQ_THERMAL', { kind: 'state', from, to, tempC: round(tempC, 1) });
-    if (to === THERMAL_STATE.SHUTDOWN) {
-      this._triggerShutdown(tempC);
-    }
+  read() {
+    return this.state;
   }
 
-  /* ================================================================ *
-   * Mitigación
-   * ================================================================ */
-
-  _computeMitigation() {
-    let level = MITIGATION.NONE;
-    const socTemp = this.getTemp(THERMAL_SENSORS.SOC);
-    const socMeta = SENSOR_META[THERMAL_SENSORS.SOC];
-
-    if (this.state === THERMAL_STATE.NOMINAL) level = MITIGATION.NONE;
-    else if (this.state === THERMAL_STATE.FAIR) {
-      level = MITIGATION.THROTTLE_LIGHT;
-    } else if (this.state === THERMAL_STATE.SERIOUS) {
-      level = MITIGATION.THROTTLE_MODERATE;
-      if (socTemp > socMeta.throttle + 3) level = MITIGATION.THROTTLE_HEAVY;
-    } else if (this.state === THERMAL_STATE.CRITICAL) {
-      level = MITIGATION.THROTTLE_HEAVY;
-      if (socTemp > socMeta.crit - 2) level = MITIGATION.THROTTLE_SEVERE;
-    } else if (this.state === THERMAL_STATE.SHUTDOWN) {
-      level = MITIGATION.SHUTDOWN;
-    }
-
-    if (!this.autoThrottleEnabled && level <= MITIGATION.THROTTLE_SEVERE) {
-      level = MITIGATION.NONE;
-    }
-
-    if (level !== this.mitigationLevel) {
-      this.mitigationLevel = level;
-      this.stats.mitigationChanges++;
-      this._applyMitigation(level);
-    }
-
-    // Mitigaciones adicionales independientes del throttling
-    const batTemp = this.getTemp(THERMAL_SENSORS.BATTERY);
-    if (this.chargeThrottleEnabled && batTemp > SENSOR_META[THERMAL_SENSORS.BATTERY].throttle) {
-      this._pauseCharging();
-    } else {
-      this._resumeCharging();
-    }
-
-    if (this.displayDimEnabled && this.state === THERMAL_STATE.SERIOUS) {
-      this._dimDisplay(0.85);
-    } else if (this.displayDimEnabled && this.state === THERMAL_STATE.CRITICAL) {
-      this._dimDisplay(0.6);
-    } else {
-      this._dimDisplay(1.0);
-    }
+  readSensor(id) {
+    return this.state.sensors[id] || null;
   }
 
-  _applyMitigation(level) {
-    const effects = MITIGATION_EFFECTS[level] || MITIGATION_EFFECTS[MITIGATION.NONE] ||
-      { cpu: 1.0, gpu: 1.0, nand: 1.0, radio: 1.0, display: 1.0, charge: true };
-
-    Logger.warn(LOG_TAG, `Aplicando mitigación nivel ${level} → cpu ${effects.cpu*100}%, gpu ${effects.gpu*100}%`);
-
-    // Notificar a los drivers vinculados
-    if (this.linkedCPU?.setThrottle)      this.linkedCPU.setThrottle(effects.cpu);
-    if (this.linkedGPU?.setThrottle)      this.linkedGPU.setThrottle(effects.gpu);
-    if (this.linkedStorage?.setThrottle)  this.linkedStorage.setThrottle(effects.nand);
-    if (this.linkedWiFi?.setThrottle)     this.linkedWiFi.setThrottle(effects.radio);
-    if (this.linkedCellular?.setThrottle) this.linkedCellular.setThrottle(effects.radio);
-
-    if (level >= MITIGATION.THROTTLE_LIGHT) this.stats.throttleEvents++;
-
-    this._emit('mitigation', { level, effects });
-    if (this.bus) this.bus.emit?.('thermal:mitigation', { level, effects });
+  readAll() {
+    return Object.values(this.state.sensors);
   }
 
-  _pauseCharging() {
-    if (this._chargePaused) return;
-    this._chargePaused = true;
-    this.stats.chargePauses++;
-    Logger.warn(LOG_TAG, 'Carga pausada por temperatura de batería');
-    if (this.linkedBattery?.setCharging) this.linkedBattery.setCharging(false);
-    this._emit('charge', { paused: true });
-  }
-
-  _resumeCharging() {
-    if (!this._chargePaused) return;
-    this._chargePaused = false;
-    Logger.info(LOG_TAG, 'Carga reanudada');
-    if (this.linkedBattery?.setCharging) this.linkedBattery.setCharging(true);
-    this._emit('charge', { paused: false });
-  }
-
-  _dimDisplay(factor) {
-    if (this._dimFactor === factor) return;
-    this._dimFactor = factor;
-    if (factor < 1) this.stats.dimEvents++;
-    if (this.linkedDisplay?.setThermalDim) this.linkedDisplay.setThermalDim(factor);
-    this._emit('display-dim', { factor });
-  }
-
-  _triggerShutdown(tempC) {
-    this.stats.shutdowns++;
-    Logger.fatal?.(LOG_TAG, `SHUTDOWN TÉRMICO a ${round(tempC, 1)}°C`);
-    this._emit('shutdown', { tempC: round(tempC, 1) });
-    if (this.bus) this.bus.emit?.('thermal:shutdown', { tempC: round(tempC, 1) });
-    this._pushIRQ('IRQ_THERMAL', { kind: 'shutdown', tempC: round(tempC, 1) });
-  }
-
-  /* ================================================================ *
-   * Tick principal
-   * ================================================================ */
-
-  tick(dtMs) {
-    if (!this.powered) return;
-    const dtS = dtMs / 1000;
-    this._t += dtS;
-    this.stats.powerOnMs += dtMs;
-
-    // 1) Calcular fuentes de calor
-    this._computeHeatSources();
-
-    // 2) Actualizar temperaturas
-    this._updateSensorTemps(dtS);
-
-    // 3) Evaluar estado
-    this._computeState();
-
-    // 4) Aplicar mitigación
-    this._computeMitigation();
-
-    // 5) Historial global
-    this._pushHistory();
-
-    // 6) Watchdog
-    this._lastTickAt = this._t * 1000;
-    this._runWatchdog(dtMs);
-
-    // 7) Métricas
-    this.stats.ticks++;
-    this.stats.lastTickAt = this._t;
-    this.stats.timeInState[this.state] += dtMs;
-    const soc = this.getTemp(THERMAL_SENSORS.SOC);
-    const gpu = this.getTemp(THERMAL_SENSORS.GPU);
-    const bat = this.getTemp(THERMAL_SENSORS.BATTERY);
-    if (soc > this.stats.peakSocTemp)     this.stats.peakSocTemp = soc;
-    if (gpu > this.stats.peakGpuTemp)     this.stats.peakGpuTemp = gpu;
-    if (bat > this.stats.peakBatteryTemp) this.stats.peakBatteryTemp = bat;
-
-    // 8) Emitir muestra
-    this._emit('tick', this.getReading());
-    if (this.bus) this.bus.emit?.('thermal:reading', this.getReading());
-  }
-
-  /* ================================================================ *
-   * Watchdog
-   * ================================================================ */
-
-  _runWatchdog(dtMs) {
-    if (!this._watchdogEnabled || !this.powered) return;
-    const now = this._t * 1000;
-    if (this._lastTickAt && (now - this._lastTickAt) > 3000) {
-      this._watchdogFires++;
-      Logger.warn(LOG_TAG, 'Watchdog: sin ticks térmicos, forzando re-medición');
-      this._lastTickAt = now;
-    }
-  }
-
-  /* ================================================================ *
-   * Cola IRQ
-   * ================================================================ */
-
-  _pushIRQ(irq, payload) {
-    if (this.irqQueue.length >= 32) { this.irqDropped++; return false; }
-    this.irqQueue.push({ irq, payload, t: this._t });
+  setScenario(scenario) {
+    if (!THERMAL_SCENARIOS[scenario]) return false;
+    const sc = THERMAL_SCENARIOS[scenario];
+    this.state.scenario = scenario;
+    this.state.ambient = sc.ambient;
+    this.charging = !!sc.charge;
     return true;
   }
 
-  drainIRQ() {
-    const q = this.irqQueue;
-    this.irqQueue = [];
-    return q;
+  setAmbient(value) {
+    this.state.ambient = clamp(value, -10, 50);
   }
 
-  /* ================================================================ *
-   * Historial + suscriptores
-   * ================================================================ */
+  getThrottle() {
+    return this.state.throttle;
+  }
 
-  _pushHistory() {
-    const max = this.getMaxTemp();
-    this.history.push({
-      t: this._t,
-      state: this.state,
-      maxSensor: max.sensor,
-      maxTemp: round(max.tempC, 1),
-      ambient: round(this.ambientC, 1),
-      mitigation: this.mitigationLevel,
-    });
-    if (this.history.length > this.historyMax) this.history.shift();
+  getState() {
+    return this.state.state;
   }
 
   subscribe(fn) {
-    this.subscribers.add(fn);
-    return () => this.subscribers.delete(fn);
+    this.listeners.add(fn);
+    return () => this.listeners.delete(fn);
   }
 
-  _emit(type, payload) {
-    for (const fn of this.subscribers) {
-      try { fn({ type, payload, ts: this._t }); }
-      catch (e) { Logger.error(LOG_TAG, `Subscriber error: ${e.message}`); }
+  shutdown() {
+    this.state.state = THERMAL_STATE.SHUTDOWN;
+    this.state.aggregate = 60;
+    this.state.throttle = 0;
+    for (const fn of this.listeners) {
+      try { fn(this.state); } catch (e) { console.error(e); }
     }
   }
 
-  /* ================================================================ *
-   * Lecturas públicas
-   * ================================================================ */
-
-  getTemps() {
-    const out = {};
-    for (const s of Object.values(this.sensors)) {
-      out[s.id] = {
-        tempC: round(s.tempC, 1),
-        trend: round(s.trend, 3),
-        meta: {
-          base: s.meta.base,
-          warn: s.meta.warn,
-          throttle: s.meta.throttle,
-          crit: s.meta.crit,
-          max: s.meta.max,
-        },
-      };
-    }
-    return out;
-  }
-
-  getReading() {
-    const max = this.getMaxTemp();
-    return {
-      state: this.state,
-      mitigation: this.mitigationLevel,
-      ambientC: round(this.ambientC, 1),
-      maxSensor: max.sensor,
-      maxTemp: round(max.tempC, 1),
-      avgTemp: round(this.getAvgTemp(), 1),
-      scenario: this.scenario.name,
-      sensorCount: Object.keys(this.sensors).length,
-      chargePaused: !!this._chargePaused,
-      dimFactor: this._dimFactor ?? 1.0,
-    };
-  }
-
-  getStats() {
-    return {
-      ...this.stats,
-      state: this.state,
-      mitigation: this.mitigationLevel,
-      maxSensor: this.getMaxTemp().sensor,
-      maxTemp: round(this.getMaxTemp().tempC, 1),
-      irqPending: this.irqQueue.length,
-      irqDropped: this.irqDropped,
-      watchdogFires: this._watchdogFires,
-    };
-  }
-
-  getHistory() { return [...this.history]; }
-
-  getSensorHistory(id) {
-    const s = this.sensors[id];
-    return s ? [...s.history] : [];
-  }
-
-  /* ================================================================ *
-   * Serialización
-   * ================================================================ */
-
-  serialize() {
-    return {
-      state: this.state,
-      mitigation: this.mitigationLevel,
-      ambientC: this.ambientC,
-      scenarioName: this.scenario.name,
-      autoThrottleEnabled: this.autoThrottleEnabled,
-      chargeThrottleEnabled: this.chargeThrottleEnabled,
-      displayDimEnabled: this.displayDimEnabled,
-      shutdownThresholdC: this.shutdownThresholdC,
-      sensors: Object.fromEntries(
-        Object.values(this.sensors).map(s => [s.id, { tempC: s.tempC }])
-      ),
-      stats: { ...this.stats },
-    };
-  }
-
-  deserialize(data) {
-    if (!data) return;
-    this.state = data.state || THERMAL_STATE.NOMINAL;
-    this.mitigationLevel = data.mitigation ?? MITIGATION.NONE;
-    this.ambientC = data.ambientC ?? 22;
-    if (data.scenarioName) this.setScenario(data.scenarioName);
-    this.autoThrottleEnabled = data.autoThrottleEnabled ?? true;
-    this.chargeThrottleEnabled = data.chargeThrottleEnabled ?? true;
-    this.displayDimEnabled = data.displayDimEnabled ?? true;
-    this.shutdownThresholdC = data.shutdownThresholdC ?? 105;
-    if (data.sensors) {
-      for (const [id, s] of Object.entries(data.sensors)) {
-        if (this.sensors[id]) this.sensors[id].tempC = s.tempC;
-      }
-    }
-    if (data.stats) Object.assign(this.stats, data.stats);
-    Logger.info(LOG_TAG, 'Estado térmico restaurado');
-  }
-
-  /* ================================================================ *
-   * Utilidades de simulación
-   * ================================================================ */
-
-  tickAll(seconds, dtMs = 100) {
-    const steps = Math.floor((seconds * 1000) / dtMs);
-    for (let i = 0; i < steps; i++) this.tick(dtMs);
-    return this.getStats();
-  }
-
-  soak(scenarioName, seconds) {
-    this.setScenario(scenarioName);
-    return this.tickAll(seconds);
-  }
-
-  /* ================================================================ *
-   * Diagnóstico
-   * ================================================================ */
-
-  dump() {
-    const r = this.getReading();
-    Logger.kernel(LOG_TAG, '─── VThermal dump ───');
-    Logger.kernel(LOG_TAG, `  estado       : ${r.state}`);
-    Logger.kernel(LOG_TAG, `  mitigación   : ${r.mitigation}`);
-    Logger.kernel(LOG_TAG, `  escenario    : ${r.scenario}`);
-    Logger.kernel(LOG_TAG, `  ambiente     : ${r.ambientC}°C`);
-    Logger.kernel(LOG_TAG, `  máx sensor   : ${r.maxSensor} @ ${r.maxTemp}°C`);
-    Logger.kernel(LOG_TAG, `  media        : ${r.avgTemp}°C`);
-    Logger.kernel(LOG_TAG, `  carga pausa  : ${r.chargePaused}`);
-    Logger.kernel(LOG_TAG, `  dim display  : ${r.dimFactor}`);
-    Logger.kernel(LOG_TAG, `  transiciones : ${this.stats.stateTransitions}`);
-    Logger.kernel(LOG_TAG, `  throttles    : ${this.stats.throttleEvents}`);
-    Logger.kernel(LOG_TAG, `  shutdowns    : ${this.stats.shutdowns}`);
-    Logger.kernel(LOG_TAG, `  picos SoC/GPU/Bat: ${round(this.stats.peakSocTemp,1)}/${round(this.stats.peakGpuTemp,1)}/${round(this.stats.peakBatteryTemp,1)}`);
-    Logger.kernel(LOG_TAG, `  tiempo estados:`);
-    for (const [k, v] of Object.entries(this.stats.timeInState)) {
-      Logger.kernel(LOG_TAG, `    · ${k.padEnd(9)} ${round(v/1000, 1)}s`);
-    }
-    Logger.kernel(LOG_TAG, `  sensores:`);
-    for (const s of Object.values(this.sensors)) {
-      const meta = s.meta;
-      const bar = this._tempBar(s.tempC, meta);
-      Logger.kernel(LOG_TAG, `    · ${s.id.padEnd(9)} ${round(s.tempC,1).toString().padStart(5)}°C ${bar}`);
-    }
-  }
-
-  _tempBar(temp, meta) {
-    const width = 20;
-    const pct = clamp((temp - meta.base) / (meta.max - meta.base), 0, 1);
-    const filled = Math.round(pct * width);
-    const marker = temp >= meta.crit ? '!' : temp >= meta.throttle ? '*' : temp >= meta.warn ? '~' : ' ';
-    return '[' + '█'.repeat(filled) + '·'.repeat(width - filled) + ']' + marker;
+  destroy() {
+    this.stop();
+    this.listeners.clear();
   }
 }
 
-export { THERMAL_STATE, THERMAL_SENSORS, MITIGATION, THERMAL_SCENARIOS };
+/* ============================================================================
+ * EXPORTS
+ * ========================================================================== */
+
+export {
+  VThermalDriver,
+  useThermal,
+  useThermalState,
+  useThermalColor,
+  simulateThermal,
+  stateFromTemp,
+  throttleFromState,
+  ThermalBar,
+  ThermalChip,
+  ThermalSensorRow,
+  THERMAL_LEVELS,
+};
 
 export default VThermal;
