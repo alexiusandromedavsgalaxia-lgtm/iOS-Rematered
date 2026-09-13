@@ -1,5 +1,3 @@
-<!-- index.html -->
-<!-- iOS Remastered — HTML base -->
 <!DOCTYPE html>
 <html lang="es">
 <head>
@@ -99,75 +97,168 @@
 
   <div id="root"></div>
 
-  <script type="module" src="/src/main.jsx"></script>
+  <!-- Capturador de errores en pantalla (visible en iPad sin consola) -->
   <script>
-(function() {
-  const box = document.createElement('div');
-  box.id = '__err';
-  box.style.cssText = `
-    position: fixed; left: 0; right: 0; bottom: 0;
-    max-height: 50%; z-index: 999999;
-    background: rgba(0,0,0,0.94); color: #fff;
-    font: 11px ui-monospace, Menlo, monospace;
-    padding: 12px; overflow: auto;
-    white-space: pre-wrap; word-break: break-word;
-    border-top: 2px solid #ff453a;
-    display: none;
-  `;
-  document.body.appendChild(box);
+  (function() {
+    function init() {
+      var box = document.createElement('div');
+      box.id = '__err';
+      box.style.cssText = [
+        'position:fixed',
+        'left:0',
+        'right:0',
+        'bottom:0',
+        'max-height:55%',
+        'z-index:999999',
+        'background:rgba(0,0,0,0.94)',
+        'color:#fff',
+        'font:11px ui-monospace,Menlo,monospace',
+        'padding:12px',
+        'overflow:auto',
+        'white-space:pre-wrap',
+        'word-break:break-word',
+        'border-top:2px solid #ff453a',
+        'display:none',
+        '-webkit-overflow-scrolling:touch',
+        'padding-bottom:calc(12px + env(safe-area-inset-bottom,0))'
+      ].join(';');
+      document.body.appendChild(box);
 
-  const show = (msg, color) => {
-    box.style.display = 'block';
-    const line = document.createElement('div');
-    line.style.cssText = 'padding:4px 0;border-bottom:1px solid rgba(255,255,255,.08);color:' + (color || '#fff');
-    line.textContent = msg;
-    box.appendChild(line);
-    box.scrollTop = box.scrollHeight;
-  };
+      var hidden = false;
 
-  // Errores no capturados
-  window.addEventListener('error', (e) => {
-    if (e.target && e.target.tagName && e.target.tagName !== 'SCRIPT') return;
-    show('❌ ' + (e.message || 'Error') + ' @ ' + (e.filename || '') + ':' + (e.lineno || ''), '#ff453a');
-  });
-  window.addEventListener('unhandledrejection', (e) => {
-    show('❌ Promesa: ' + (e.reason?.message || e.reason), '#ff453a');
-  });
+      function show(msg, color) {
+        if (hidden) return;
+        box.style.display = 'block';
+        var line = document.createElement('div');
+        line.style.cssText = 'padding:4px 0;border-bottom:1px solid rgba(255,255,255,.08);color:' + (color || '#fff');
+        line.textContent = msg;
+        box.appendChild(line);
+        box.scrollTop = box.scrollHeight;
+        // Máximo 200 líneas
+        while (box.children.length > 200) box.removeChild(box.firstChild);
+      }
 
-  // Interceptar console.error y console.warn
-  const origErr = console.error;
-  console.error = function(...a) {
-    show('❌ ' + a.map(x => {
-      try { return typeof x === 'object' ? JSON.stringify(x) : String(x); }
-      catch { return String(x); }
-    }).join(' '), '#ff453a');
-    origErr.apply(console, a);
-  };
-  const origWarn = console.warn;
-  console.warn = function(...a) {
-    show('⚠️ ' + a.map(String).join(' '), '#ffd60a');
-    origWarn.apply(console, a);
-  };
-  const origLog = console.log;
-  console.log = function(...a) {
-    show('ℹ️ ' + a.map(x => {
-      try { return typeof x === 'object' ? JSON.stringify(x) : String(x); }
-      catch { return String(x); }
-    }).join(' '), '#8e8e93');
-    origLog.apply(console, a);
-  };
+      function fmt(x) {
+        try {
+          if (x instanceof Error) return x.stack || x.message || String(x);
+          if (typeof x === 'object') return JSON.stringify(x);
+          return String(x);
+        } catch (e) {
+          return String(x);
+        }
+      }
 
-  // Doble tap en la esquina superior izquierda = limpiar
-  let taps = 0, t0 = 0;
-  document.addEventListener('touchstart', (e) => {
-    const t = e.touches[0];
-    if (t.clientX < 60 && t.clientY < 60) {
-      const now = Date.now();
-      if (now - t0 < 400) { box.innerHTML = ''; box.style.display = 'none'; }
-      t0 = now;
+      window.addEventListener('error', function(e) {
+        if (e.target && e.target.tagName && e.target.tagName !== 'SCRIPT') return;
+        show('❌ ' + (e.message || 'Error') + ' @ ' + (e.filename || '') + ':' + (e.lineno || ''), '#ff453a');
+        if (e.error && e.error.stack) {
+          show(e.error.stack, '#ff8a80');
+        }
+      }, true);
+
+      window.addEventListener('unhandledrejection', function(e) {
+        var r = e.reason;
+        show('❌ Promesa: ' + (r && r.message ? r.message : fmt(r)), '#ff453a');
+        if (r && r.stack) show(r.stack, '#ff8a80');
+      });
+
+      var origErr = console.error;
+      console.error = function() {
+        var args = Array.prototype.slice.call(arguments);
+        show('❌ ' + args.map(fmt).join(' '), '#ff453a');
+        try { origErr.apply(console, args); } catch (e) {}
+      };
+
+      var origWarn = console.warn;
+      console.warn = function() {
+        var args = Array.prototype.slice.call(arguments);
+        show('⚠️ ' + args.map(fmt).join(' '), '#ffd60a');
+        try { origWarn.apply(console, args); } catch (e) {}
+      };
+
+      var origLog = console.log;
+      console.log = function() {
+        var args = Array.prototype.slice.call(arguments);
+        show('ℹ️ ' + args.map(fmt).join(' '), '#b0b0b0');
+        try { origLog.apply(console, args); } catch (e) {}
+      };
+
+      // Botón flotante para ocultar/mostrar
+      var toggle = document.createElement('button');
+      toggle.textContent = '✕';
+      toggle.style.cssText = [
+        'position:fixed',
+        'top:calc(10px + env(safe-area-inset-top,0))',
+        'right:10px',
+        'width:36px',
+        'height:36px',
+        'border-radius:50%',
+        'background:rgba(0,0,0,0.7)',
+        'color:#fff',
+        'border:1px solid rgba(255,255,255,0.2)',
+        'font-size:16px',
+        'z-index:1000000',
+        'cursor:pointer',
+        'display:none'
+      ].join(';');
+      toggle.onclick = function() {
+        hidden = !hidden;
+        box.style.display = hidden ? 'none' : 'block';
+        toggle.textContent = hidden ? '!' : '✕';
+      };
+      document.body.appendChild(toggle);
+
+      // Mostrar el toggle en cuanto haya algo
+      var origShow = show;
+      show = function(m, c) {
+        toggle.style.display = 'block';
+        origShow(m, c);
+      };
+
+      // Doble tap arriba-izquierda limpia
+      var taps = 0, t0 = 0;
+      document.addEventListener('touchstart', function(e) {
+        var t = e.touches[0];
+        if (t.clientX < 60 && t.clientY < 60) {
+          var now = Date.now();
+          if (now - t0 < 400) {
+            box.innerHTML = '';
+            box.style.display = 'none';
+            hidden = true;
+            toggle.textContent = '!';
+          }
+          t0 = now;
+        }
+      }, { passive: true });
     }
-  });
-})();
-</script>
 
-  
+    if (document.body) init();
+    else document.addEventListener('DOMContentLoaded', init, { once: true });
+  })();
+  </script>
+
+  <!-- App principal -->
+  <script type="module" src="/src/main.jsx"></script>
+
+  <!-- Ocultamos el splash cuando React monta -->
+  <script>
+    (function() {
+      function hide() {
+        var el = document.getElementById('boot-splash');
+        if (!el) return;
+        el.classList.add('is-hidden');
+        setTimeout(function() { el.remove(); }, 500);
+      }
+      if (window.requestAnimationFrame) {
+        window.requestAnimationFrame(function() {
+          window.requestAnimationFrame(hide);
+        });
+      } else {
+        setTimeout(hide, 100);
+      }
+      // Red de seguridad: ocultar tras 6s pase lo que pase
+      setTimeout(hide, 6000);
+    })();
+  </script>
+</body>
+</html>
